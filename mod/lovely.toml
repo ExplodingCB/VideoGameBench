@@ -1,0 +1,79 @@
+# BalatroBench - Lovely Injector Configuration
+
+[manifest]
+version = "1.0.0"
+priority = 10
+
+# Register Lua modules
+[[patches]]
+[patches.module]
+source = "server.lua"
+before = "main.lua"
+name = "balatrobench_server"
+
+[[patches]]
+[patches.module]
+source = "state.lua"
+before = "main.lua"
+name = "balatrobench_state"
+
+[[patches]]
+[patches.module]
+source = "actions.lua"
+before = "main.lua"
+name = "balatrobench_actions"
+
+[[patches]]
+[patches.module]
+source = "format.lua"
+before = "main.lua"
+name = "balatrobench_format"
+
+[[patches]]
+[patches.module]
+source = "BalatroBench.lua"
+before = "main.lua"
+name = "balatrobench_main"
+
+# Hook: Initialize mod after love.load
+[[patches]]
+[patches.pattern]
+target = "main.lua"
+pattern = '''function love.load()'''
+position = "after"
+match_indent = false
+payload = '''
+    local bb_ok, bb_mod = pcall(require, "balatrobench_main")
+    if bb_ok and bb_mod then
+        _G.BalatroBench_mod = bb_mod
+        print("[BalatroBench] Mod loaded successfully")
+    else
+        print("[BalatroBench] Failed to load: " .. tostring(bb_mod))
+    end
+'''
+
+# Hook: Update loop - called every frame
+[[patches]]
+[patches.pattern]
+target = "game.lua"
+pattern = '''function Game:update(dt)'''
+position = "after"
+match_indent = false
+payload = '''
+    if _G.BalatroBench_mod and _G.BalatroBench_mod.update then
+        _G.BalatroBench_mod.update(dt)
+    end
+'''
+
+# Hook: Clean shutdown
+[[patches]]
+[patches.pattern]
+target = "main.lua"
+pattern = '''function love.quit()'''
+position = "after"
+match_indent = false
+payload = '''
+    if _G.BalatroBench_mod and _G.BalatroBench_mod.shutdown then
+        _G.BalatroBench_mod.shutdown()
+    end
+'''

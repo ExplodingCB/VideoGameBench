@@ -1,0 +1,16 @@
+# BalatroBench Configuration
+
+default:
+  deck: "Red Deck"        # Starting deck (Red Deck, Blue Deck, etc.)
+  stake: 1                # Difficulty 1-8 (1=White, 2=Red, ..., 8=Gold)
+  mod_host: "127.0.0.1"
+  mod_port: 12345
+  max_retries: 3          # Retries per action if model gives invalid JSON
+  timeout_seconds: 300    # Max seconds to wait for model response
+
+models:
+  openrouter:
+    api_key_env: "OPENROUTER_API_KEY"  # Environment variable name for API key
+    base_url: "https://openrouter.ai/api/v1"
+  local:
+    base_url: "http://localhost:11434/v1"  # Ollama default

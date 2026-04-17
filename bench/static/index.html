@@ -1,0 +1,687 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>BalatroBench Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1f2330;
+    --border: #2a2f3d;
+    --text: #e6e9ef;
+    --muted: #8a93a6;
+    --accent: #ff9f43;
+    --accent-2: #4ba6ff;
+    --good: #3ecf8e;
+    --bad: #ff6b6b;
+    --warn: #ffd166;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 18px 24px; border-bottom: 1px solid var(--border); display: flex;
+    align-items: center; justify-content: space-between; background: var(--panel); }
+  header h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  header h1 span { color: var(--accent); }
+  header .tag { color: var(--muted); font-size: 12px; margin-left: 12px; }
+
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 24px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 18px; margin-bottom: 18px; }
+  .panel h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px; color: var(--muted); }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .col { display: flex; flex-direction: column; gap: 4px; }
+  .col label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  input, select, button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 9px 11px; font-size: 14px; font-family: inherit;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent-2); }
+  input[type=number] { width: 90px; }
+  input.wide { width: 360px; }
+  button { cursor: pointer; font-weight: 600; }
+  button.primary { background: var(--accent); color: #000; border-color: var(--accent); }
+  button.primary:hover { filter: brightness(1.1); }
+  button.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .badge { display: inline-block; padding: 3px 8px; border-radius: 10px; font-size: 11px;
+    font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; }
+  .badge.running { background: var(--accent-2); color: #000; }
+  .badge.restarting_game { background: var(--warn); color: #000; }
+  .badge.finished { background: var(--good); color: #000; }
+  .badge.failed, .badge.stopped { background: var(--bad); color: #fff; }
+  .badge.queued { background: var(--warn); color: #000; }
+  .badge.idle { background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
+
+  #status-line { font-size: 13px; color: var(--muted); margin-top: 10px; }
+  #status-line b { color: var(--text); }
+
+  .runs-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .runs-grid { grid-template-columns: 1fr; } }
+  .run-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; }
+  .run-card h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; display: flex;
+    justify-content: space-between; align-items: center; }
+  .run-card .meta { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+  .run-card .chart-wrap { position: relative; height: 180px; }
+  .run-card .tally { display: flex; gap: 12px; margin-top: 10px; font-size: 12px;
+    color: var(--muted); flex-wrap: wrap; }
+  .run-card .tally b { color: var(--text); }
+
+  .thinking-wrap { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+  .thinking-header { display: flex; align-items: center; justify-content: space-between;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted);
+    cursor: pointer; user-select: none; }
+  .thinking-header .toggle { color: var(--accent-2); font-weight: 600; }
+  .thinking-live { display: inline-flex; align-items: center; gap: 6px; color: var(--warn); }
+  .thinking-live .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn);
+    animation: pulse 1.2s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .thinking-log { margin-top: 8px; max-height: 280px; overflow-y: auto;
+    background: #0b0d12; border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px; font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11.5px; line-height: 1.5; color: #c9cfd9; }
+  .thinking-log.collapsed { display: none; }
+  .thinking-entry { margin-bottom: 10px; padding-bottom: 8px;
+    border-bottom: 1px dashed #232836; }
+  .thinking-entry:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+  .thinking-entry .t-head { color: var(--muted); font-size: 10.5px;
+    margin-bottom: 4px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .thinking-entry .t-head .turn { color: var(--accent); font-weight: 600; }
+  .thinking-entry .t-head .ok { color: var(--good); }
+  .thinking-entry .t-head .bad { color: var(--bad); }
+  .thinking-entry .t-body { white-space: pre-wrap; word-break: break-word;
+    color: #d6dbe5; }
+  .thinking-entry .t-action { margin-top: 6px; color: var(--accent-2);
+    font-weight: 600; }
+  .thinking-entry.thinking-pending { color: var(--warn); font-style: italic; }
+  .state-block { margin-bottom: 6px; }
+  .state-block details { background: #0e1017; border: 1px solid #222837;
+    border-radius: 4px; padding: 0; }
+  .state-block summary { cursor: pointer; color: var(--muted);
+    font-size: 10.5px; padding: 5px 8px; user-select: none; list-style: none; }
+  .state-block summary::-webkit-details-marker { display: none; }
+  .state-block summary::before { content: "▸ "; color: var(--accent-2); }
+  .state-block details[open] summary::before { content: "▾ "; }
+  .state-block summary:hover { color: var(--text); }
+  .state-block pre { margin: 0; padding: 8px; background: #07090e;
+    border-top: 1px solid #222837; color: #a8b0c0; font-size: 10.5px;
+    line-height: 1.45; white-space: pre-wrap; word-break: break-word;
+    max-height: 260px; overflow-y: auto; }
+
+  .datalist-hint { font-size: 11px; color: var(--muted); margin-top: 3px; }
+
+  .history-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .history-table th, .history-table td { text-align: left; padding: 8px 10px;
+    border-bottom: 1px solid var(--border); }
+  .history-table th { color: var(--muted); font-weight: 600; font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.3px; }
+  .history-table tr:hover { background: var(--panel-2); }
+  .history-table .model-cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+
+  .pill { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 11px;
+    font-weight: 600; }
+  .pill.win { background: var(--good); color: #000; }
+  .pill.loss { background: var(--bad); color: #fff; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Balatro<span>Bench</span> <span class="tag">AI Benchmark Dashboard</span></h1>
+  <div id="global-status"><span class="badge idle" id="job-badge">idle</span></div>
+</header>
+
+<div class="wrap">
+  <div class="panel">
+    <h2>Start a Batch</h2>
+    <div class="row">
+      <div class="col">
+        <label for="model">Model</label>
+        <input id="model" class="wide" list="models-list" placeholder="e.g. arcee-ai/trinity-large-preview:free" />
+        <datalist id="models-list"></datalist>
+        <div class="datalist-hint" id="models-hint">Loading OpenRouter catalog…</div>
+      </div>
+      <div class="col">
+        <label for="deck">Deck</label>
+        <select id="deck">
+          <option>Red Deck</option><option>Blue Deck</option><option>Yellow Deck</option>
+          <option>Green Deck</option><option>Black Deck</option><option>Magic Deck</option>
+          <option>Nebula Deck</option><option>Ghost Deck</option><option>Abandoned Deck</option>
+          <option>Checkered Deck</option><option>Zodiac Deck</option><option>Painted Deck</option>
+          <option>Anaglyph Deck</option><option>Plasma Deck</option><option>Erratic Deck</option>
+        </select>
+      </div>
+      <div class="col">
+        <label for="stake">Stake</label>
+        <input id="stake" type="number" min="1" max="8" value="1" />
+      </div>
+      <div class="col">
+        <label for="runs">Runs</label>
+        <input id="runs" type="number" min="1" max="100" value="5" />
+      </div>
+      <div class="col">
+        <label for="api-key">API Key (optional)</label>
+        <input id="api-key" type="password" placeholder="uses OPENROUTER_API_KEY env" />
+      </div>
+      <div class="col" style="justify-content:flex-end">
+        <label title="Kill + relaunch Balatro before every run. Slower but guarantees a clean mod state.">
+          <input id="auto-restart" type="checkbox" checked style="margin-right:6px;vertical-align:middle" />
+          Auto-restart Balatro
+        </label>
+      </div>
+      <div class="col">
+        <label>&nbsp;</label>
+        <button id="start-btn" class="primary">Start</button>
+      </div>
+      <div class="col">
+        <label>&nbsp;</label>
+        <button id="stop-btn" class="danger" disabled>Stop</button>
+      </div>
+    </div>
+    <div id="status-line">
+      Idle. Pick a model and hit Start. Runs stop early if the model <i>wins</i> a run.
+    </div>
+  </div>
+
+  <div class="panel" id="active-runs-panel" style="display:none">
+    <h2>Active Batch</h2>
+    <div class="runs-grid" id="active-runs"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Run History</h2>
+    <table class="history-table" id="history-table">
+      <thead><tr>
+        <th>Time</th><th>Model</th><th>Deck</th><th>Stake</th><th>Result</th>
+        <th>Ante</th><th>Furthest Blind</th><th>Rounds</th>
+        <th>Actions</th><th>Duration</th><th>Tokens</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+const $ = (s) => document.querySelector(s);
+const fmt = (n) => n === null || n === undefined ? "—" : Number(n).toLocaleString();
+const fmtTs = (ts) => new Date(ts).toLocaleTimeString();
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+// ---------------------------------------------------------------------------
+// Load models + settings
+// ---------------------------------------------------------------------------
+async function loadModels() {
+  try {
+    const data = await api("/api/models");
+    const list = $("#models-list");
+    list.innerHTML = "";
+    for (const m of data.models) {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      opt.label = m.name;
+      list.appendChild(opt);
+    }
+    $("#models-hint").textContent = `${data.models.length} models available from OpenRouter`;
+  } catch (e) {
+    $("#models-hint").textContent = `Couldn't load model list: ${e.message}`;
+  }
+}
+
+async function loadSettings() {
+  const s = await api("/api/settings");
+  $("#model").value = s.model;
+  $("#deck").value = s.deck;
+  $("#stake").value = s.stake;
+  $("#runs").value = s.runs;
+  $("#auto-restart").checked = s.auto_restart_balatro !== false;
+  if (s.api_key) $("#api-key").value = s.api_key;
+}
+
+// ---------------------------------------------------------------------------
+// Run cards — each active run_id gets a live-updating Chart.js line chart
+// ---------------------------------------------------------------------------
+const runCards = new Map();  // run_id -> { el, chart, dataPoints, finished, eventSource }
+
+function createRunCard(runId, index) {
+  const card = document.createElement("div");
+  card.className = "run-card";
+  card.dataset.runId = runId;
+  card.innerHTML = `
+    <h3>
+      <span>Run #${index} <span class="tag" style="color:var(--muted);font-weight:400">${runId}</span></span>
+      <span class="badge running" data-role="status">running</span>
+    </h3>
+    <div class="meta" data-role="meta">Waiting for first action…</div>
+    <div class="chart-wrap"><canvas></canvas></div>
+    <div class="tally" data-role="tally"></div>
+    <div class="thinking-wrap">
+      <div class="thinking-header" data-role="thinking-toggle">
+        <span>Model thinking · <span data-role="thinking-count">0</span> turns</span>
+        <span class="thinking-live" data-role="thinking-live" style="display:none">
+          <span class="dot"></span> thinking…
+        </span>
+        <span class="toggle" data-role="thinking-toggle-label">hide ▲</span>
+      </div>
+      <div class="thinking-log" data-role="thinking-log"></div>
+    </div>
+  `;
+  $("#active-runs").appendChild(card);
+
+  const ctx = card.querySelector("canvas").getContext("2d");
+  const chart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: [],
+      datasets: [
+        {
+          label: "Current score",
+          data: [],
+          borderColor: "#4ba6ff",
+          backgroundColor: "rgba(75,166,255,0.15)",
+          tension: 0.25,
+          pointRadius: 2,
+          fill: true,
+        },
+        {
+          label: "Target",
+          data: [],
+          borderColor: "#ff9f43",
+          borderDash: [4, 4],
+          pointRadius: 0,
+          fill: false,
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      animation: { duration: 250 },
+      plugins: {
+        legend: { labels: { color: "#e6e9ef", boxWidth: 10 } },
+        tooltip: {
+          callbacks: {
+            title: (items) => `Action #${items[0].label}`,
+            label: (item) => `${item.dataset.label}: ${fmt(item.parsed.y)}`,
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { color: "#8a93a6" }, grid: { color: "#2a2f3d" },
+             title: { display: true, text: "Action #", color: "#8a93a6" } },
+        y: { ticks: { color: "#8a93a6", callback: (v) => Number(v).toLocaleString() },
+             grid: { color: "#2a2f3d" }, beginAtZero: true,
+             title: { display: true, text: "Chips", color: "#8a93a6" } },
+      },
+    },
+  });
+
+  const entry = { el: card, chart, actionIdx: 0, finished: false,
+                  lastState: {}, tallies: { hands: 0, discards: 0, buys: 0, plays: 0 },
+                  thinkingCount: 0, pendingThinkEl: null,
+                  // pendingStateText holds the most recent full state_text
+                  // event, to be attached to the NEXT model_response entry.
+                  pendingStateText: null };
+  runCards.set(runId, entry);
+
+  // Wire up the "hide/show model thinking" toggle. Default = expanded so
+  // you can watch the model reason in real time.
+  const toggleHeader = card.querySelector("[data-role=thinking-toggle]");
+  const toggleLabel = card.querySelector("[data-role=thinking-toggle-label]");
+  const thinkingLog = card.querySelector("[data-role=thinking-log]");
+  toggleHeader.addEventListener("click", () => {
+    const collapsed = thinkingLog.classList.toggle("collapsed");
+    toggleLabel.textContent = collapsed ? "show ▼" : "hide ▲";
+  });
+
+  // Open SSE stream for this run
+  const es = new EventSource(`/api/run/${runId}/stream`);
+  entry.eventSource = es;
+  es.onmessage = (ev) => handleRunEvent(runId, JSON.parse(ev.data));
+  es.onerror = () => {
+    // The server closes the stream on run_finished; browser will retry —
+    // if we've already seen run_finished, stop reconnecting.
+    if (entry.finished) es.close();
+  };
+  return entry;
+}
+
+function handleRunEvent(runId, evt) {
+  const entry = runCards.get(runId);
+  if (!entry) return;
+  const chart = entry.chart;
+  const statusEl = entry.el.querySelector("[data-role=status]");
+  const metaEl = entry.el.querySelector("[data-role=meta]");
+  const tallyEl = entry.el.querySelector("[data-role=tally]");
+
+  if (evt.type === "run_started") {
+    metaEl.textContent = `${evt.model} | ${evt.deck} | Stake ${evt.stake}`;
+  } else if (evt.type === "state_text") {
+    // Stash the full text of the state the model will be shown on its next
+    // turn. It gets attached to that turn's model_response entry in the
+    // thinking panel.
+    entry.pendingStateText = evt.text;
+  } else if (evt.type === "state") {
+    entry.lastState = evt;
+    // Only plot points when we're actually in a blind (target > 0). In
+    // shop / blind-select / game-over phases target is 0 or null, and
+    // plotting it would drag the chart down to zero between rounds.
+    if (evt.current_score !== null && evt.target_score) {
+      const label = String(evt.action_index);
+      const xs = chart.data.labels;
+      if (xs[xs.length - 1] !== label) {
+        xs.push(label);
+        chart.data.datasets[0].data.push(evt.current_score);
+        chart.data.datasets[1].data.push(evt.target_score);
+        chart.update("none");
+      } else {
+        chart.data.datasets[0].data[xs.length - 1] = evt.current_score;
+        chart.data.datasets[1].data[xs.length - 1] = evt.target_score;
+        chart.update("none");
+      }
+    }
+    const parts = [];
+    if (evt.ante) parts.push(`Ante ${evt.ante}/8`);
+    if (evt.round_label) parts.push(evt.round_label);
+    if (evt.phase) parts.push(evt.phase);
+    if (parts.length) metaEl.textContent = parts.join(" · ");
+  } else if (evt.type === "action") {
+    const a = evt.action?.action;
+    if (a === "play") entry.tallies.plays++;
+    else if (a === "discard") entry.tallies.discards++;
+    else if (a === "buy") entry.tallies.buys++;
+    if (evt.hands_left !== null && evt.hands_left !== undefined) {
+      entry.tallies.hands = evt.hands_left;
+    }
+    renderTally(entry);
+  } else if (evt.type === "model_thinking") {
+    // Show a transient "thinking..." marker; replaced by the next model_response.
+    const liveEl = entry.el.querySelector("[data-role=thinking-live]");
+    liveEl.style.display = "inline-flex";
+    liveEl.lastChild.textContent = evt.attempt > 1
+      ? ` retry ${evt.attempt}/${evt.max_attempts || "?"}…`
+      : ` thinking (turn ${evt.action_index + 1})…`;
+  } else if (evt.type === "model_error") {
+    const liveEl = entry.el.querySelector("[data-role=thinking-live]");
+    liveEl.style.display = "none";
+    appendThinkingEntry(entry, {
+      turnLabel: `turn ${evt.action_index + 1}`,
+      attempt: evt.attempt,
+      ok: false,
+      body: `API error: ${evt.error}`,
+      action: null,
+    });
+  } else if (evt.type === "model_response") {
+    const liveEl = entry.el.querySelector("[data-role=thinking-live]");
+    liveEl.style.display = "none";
+    // Attach the state snapshot the model saw for THIS turn. Only the
+    // first attempt of a turn gets it; retries reuse the same state.
+    const stateText = (evt.attempt === 1) ? entry.pendingStateText : null;
+    appendThinkingEntry(entry, {
+      turnLabel: `turn ${evt.action_index + 1}`,
+      attempt: evt.attempt,
+      ok: evt.parse_ok,
+      body: evt.response || "(empty response)",
+      action: evt.parsed_action,
+      promptTokens: evt.prompt_tokens,
+      completionTokens: evt.completion_tokens,
+      elapsed: evt.elapsed_seconds,
+      finishReason: evt.finish_reason,
+      stateText: stateText,
+    });
+  } else if (evt.type === "run_finished") {
+    entry.finished = true;
+    const r = evt.record?.result || {};
+    const won = r.won;
+    statusEl.textContent = won ? "win" : "loss";
+    statusEl.className = `badge ${won ? "finished" : "failed"}`;
+    const summary = [
+      `Ante ${r.ante_reached}/8`,
+      `Rounds ${r.rounds_won}`,
+      `${r.total_actions} actions (${r.invalid_actions} invalid)`,
+      `${evt.record.timing.total_seconds}s`,
+      `${fmt(evt.record.tokens.total_tokens)} tokens`,
+    ].join(" · ");
+    tallyEl.innerHTML = `<b>${summary}</b>`;
+    // Final cleanup: hide any stale "thinking…" indicator.
+    const liveEl = entry.el.querySelector("[data-role=thinking-live]");
+    if (liveEl) liveEl.style.display = "none";
+    if (entry.eventSource) entry.eventSource.close();
+  }
+}
+
+function appendThinkingEntry(entry, info) {
+  const log = entry.el.querySelector("[data-role=thinking-log]");
+  const countEl = entry.el.querySelector("[data-role=thinking-count]");
+
+  const div = document.createElement("div");
+  div.className = "thinking-entry";
+  const okBadge = info.ok ? '<span class="ok">✓ parsed</span>'
+                          : '<span class="bad">✗ parse failed</span>';
+  const tokBits = [];
+  if (info.promptTokens) tokBits.push(`${info.promptTokens} prompt`);
+  if (info.completionTokens) tokBits.push(`${info.completionTokens} completion`);
+  if (info.elapsed != null) tokBits.push(`${info.elapsed.toFixed(1)}s`);
+  // Surface provider-side truncation — if finish_reason === "length" the
+  // model wanted to keep going but the provider cut it off. This is useful
+  // for diagnosing "why did the model's reasoning stop mid-sentence".
+  if (info.finishReason && info.finishReason !== "stop") {
+    tokBits.push(`<span style="color:var(--bad)">finish=${info.finishReason}</span>`);
+  }
+  const tokenInfo = tokBits.length ? ` · ${tokBits.join(" · ")}` : "";
+
+  const attemptTxt = (info.attempt && info.attempt > 1) ? ` (retry ${info.attempt})` : "";
+  // Build optional "What the model saw" collapsible state block.
+  const stateBlockHtml = info.stateText
+    ? `<div class="state-block"><details>
+         <summary>What the model saw (${info.stateText.length.toLocaleString()} chars)</summary>
+         <pre></pre>
+       </details></div>`
+    : "";
+  div.innerHTML = `
+    <div class="t-head">
+      <span class="turn">${info.turnLabel}${attemptTxt}</span>
+      ${okBadge}
+      <span>${tokenInfo}</span>
+    </div>
+    ${stateBlockHtml}
+    <div class="t-body"></div>
+    ${info.action ? `<div class="t-action">→ ${escapeHtml(JSON.stringify(info.action))}</div>` : ""}
+  `;
+  // Use textContent so user text isn't interpreted as HTML
+  div.querySelector(".t-body").textContent = info.body;
+  if (info.stateText) {
+    div.querySelector(".state-block pre").textContent = info.stateText;
+  }
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;  // auto-follow like a terminal
+  entry.thinkingCount++;
+  countEl.textContent = entry.thinkingCount;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function renderTally(entry) {
+  const t = entry.tallies;
+  const s = entry.lastState || {};
+  const tallyEl = entry.el.querySelector("[data-role=tally]");
+  tallyEl.innerHTML = `
+    <div>Plays <b>${t.plays}</b></div>
+    <div>Discards <b>${t.discards}</b></div>
+    <div>Buys <b>${t.buys}</b></div>
+    ${s.money !== undefined && s.money !== null ? `<div>$ <b>${s.money}</b></div>` : ""}
+    ${s.current_score !== null && s.target_score !== null
+      ? `<div>Score <b>${fmt(s.current_score)} / ${fmt(s.target_score)}</b></div>` : ""}
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// Job polling + lifecycle
+// ---------------------------------------------------------------------------
+let lastSeenRunIds = [];
+
+async function pollStatus() {
+  try {
+    const data = await api("/api/status");
+    const job = data.job;
+    const badge = $("#job-badge");
+
+    if (!job) {
+      badge.textContent = "idle";
+      badge.className = "badge idle";
+      $("#status-line").textContent = "Idle. Pick a model and hit Start.";
+      $("#start-btn").disabled = false;
+      $("#stop-btn").disabled = true;
+      return;
+    }
+
+    badge.textContent = job.status;
+    badge.className = `badge ${job.status}`;
+    $("#start-btn").disabled = ["queued", "running"].includes(job.status);
+    $("#stop-btn").disabled = !["queued", "running"].includes(job.status);
+
+    const statusText = [
+      `<b>${job.model}</b>`, job.deck, `stake ${job.stake}`,
+      `run ${job.current_run_index}/${job.requested_runs}`,
+      job.status === "restarting_game"
+        ? "<span style=\"color:var(--warn)\">restarting Balatro…</span>"
+        : job.status,
+    ].filter(Boolean).join(" · ");
+    let tail = "";
+    if (job.error) tail = ` <span style="color:var(--bad)">${job.error}</span>`;
+    $("#status-line").innerHTML = statusText + tail;
+
+    // Surface new run_ids as cards
+    if (job.run_ids.length) $("#active-runs-panel").style.display = "block";
+    for (let i = 0; i < job.run_ids.length; i++) {
+      const rid = job.run_ids[i];
+      if (!runCards.has(rid)) {
+        createRunCard(rid, i + 1);
+      }
+    }
+
+    // When the job is done, refresh history and — if starting a new batch —
+    // clear the active panel on the NEXT start click (not automatically).
+    if (["finished", "failed", "stopped"].includes(job.status)) {
+      await loadHistory();
+    }
+  } catch (e) {
+    console.warn("status poll failed", e);
+  }
+}
+
+async function loadHistory() {
+  try {
+    const data = await api("/api/runs");
+    const tbody = $("#history-table tbody");
+    tbody.innerHTML = "";
+    for (const r of data.runs.slice(0, 100)) {
+      const tr = document.createElement("tr");
+      const won = r.result?.won;
+      const aborted = r.result?.aborted;
+      const resultCell = aborted
+        ? `<span class="pill" style="background:var(--warn);color:#000">STOP</span>`
+        : `<span class="pill ${won ? "win" : "loss"}">${won ? "WIN" : "LOSS"}</span>`;
+      tr.innerHTML = `
+        <td>${(r.timestamp || "").replace("T", " ").replace("Z", "")}</td>
+        <td class="model-cell" title="${r.model}">${r.model}</td>
+        <td>${r.config?.deck || ""}</td>
+        <td>${r.config?.stake ?? ""}</td>
+        <td>${resultCell}</td>
+        <td>${r.result?.ante_reached ?? 0}/8</td>
+        <td>${r.result?.furthest_blind ?? "—"}</td>
+        <td>${r.result?.rounds_won ?? 0}</td>
+        <td>${r.result?.total_actions ?? 0} (${r.result?.invalid_actions ?? 0} inv.)</td>
+        <td>${r.timing?.total_seconds ?? 0}s</td>
+        <td>${fmt(r.tokens?.total_tokens)}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+  } catch (e) {
+    console.warn("history load failed", e);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wire up start/stop + periodic polling
+// ---------------------------------------------------------------------------
+$("#start-btn").addEventListener("click", async () => {
+  // Clear old cards
+  for (const [rid, entry] of runCards) {
+    if (entry.eventSource) entry.eventSource.close();
+  }
+  runCards.clear();
+  $("#active-runs").innerHTML = "";
+  lastSeenRunIds = [];
+
+  try {
+    const body = {
+      model: $("#model").value.trim(),
+      deck: $("#deck").value,
+      stake: parseInt($("#stake").value, 10),
+      runs: parseInt($("#runs").value, 10),
+      auto_restart_balatro: $("#auto-restart").checked,
+      api_key: $("#api-key").value || undefined,
+    };
+    await api("/api/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    await pollStatus();
+  } catch (e) {
+    alert("Couldn't start: " + e.message);
+  }
+});
+
+$("#stop-btn").addEventListener("click", async () => {
+  try { await api("/api/stop", { method: "POST" }); } catch (e) { /* ignore */ }
+  await pollStatus();
+});
+
+// Persist settings on change
+for (const id of ["model", "deck", "stake", "runs"]) {
+  $("#" + id).addEventListener("change", async () => {
+    const payload = {};
+    payload[id] = id === "stake" || id === "runs"
+      ? parseInt($("#" + id).value, 10) : $("#" + id).value;
+    await api("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  });
+}
+$("#auto-restart").addEventListener("change", async () => {
+  await api("/api/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ auto_restart_balatro: $("#auto-restart").checked }),
+  });
+});
+
+// Init
+(async () => {
+  await Promise.all([loadModels(), loadSettings(), loadHistory()]);
+  setInterval(pollStatus, 1500);
+  pollStatus();
+})();
+</script>
+</body>
+</html>

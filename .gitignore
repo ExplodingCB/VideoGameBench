@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Environment & secrets — NEVER commit these
+.env
+.env.local
+*.key
+*secret*
+*.pem
+
+# Per-user local state written by the webapp. Can contain API keys typed
+# into the dashboard "API Key" field, so it is NOT committed.
+.webapp_settings.json
+
+# Benchmark run artifacts (local-only; they can be large and contain
+# full verbatim model responses / game state dumps)
+results.jsonl
+run_events/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
