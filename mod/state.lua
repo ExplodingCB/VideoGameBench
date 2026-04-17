@@ -86,22 +86,204 @@ end
 local function substitute_vars(lines, vars)
     if type(lines) ~= "table" then lines = {tostring(lines)} end
     if not vars then vars = {} end
+
+    -- Find the highest numeric index in `vars`. We CAN'T use ipairs or #vars
+    -- because either stops at the first nil — and loc_vars on partially-
+    -- initialized shop cards often returns sparse tables like {15, nil}
+    -- (when a late-populated ability.extra field isn't set yet). That
+    -- would leave #2# unsubstituted and rendered as "?", which is the
+    -- exact bug that made Mystic Summit show "+? Mult when ? discards".
+    local max_idx = 0
+    for k, _ in pairs(vars) do
+        if type(k) == "number" and k > max_idx then max_idx = k end
+    end
+
     local out = {}
     for _, line in ipairs(lines) do
         local s = tostring(line)
-        -- Substitute #1#, #2#, ... with vars[1], vars[2], ...
-        for i, v in ipairs(vars) do
-            s = s:gsub("#" .. i .. "#", tostring(v))
+        -- Substitute #1#, #2#, ... up to the highest present index,
+        -- skipping nil entries rather than stopping at them.
+        for i = 1, max_idx do
+            local v = vars[i]
+            if v ~= nil then
+                s = s:gsub("#" .. i .. "#", tostring(v))
+            end
         end
-        -- Any leftover #N# means the template wanted more vars than we had;
-        -- leave it rather than erroring, but strip the markers visually.
+        -- Any leftover #N# means the template wanted more vars than the
+        -- center's loc_vars provided. Replace with ? so the text is at
+        -- least legible, but leave a comment so readers of a JSONL event
+        -- log can tell this was a best-effort substitution, not a real
+        -- game value.
         s = s:gsub("#%d+#", "?")
         table.insert(out, s)
     end
     return out
 end
 
+-- Helper for _walk_ui_text: extract text from something that might be
+-- a plain string, a list, a DynaText segment, or a callable. Returns
+-- a list of strings (possibly empty). Function-valued fields are
+-- invoked with pcall — DynaText often stores `string` as a closure
+-- over the current mult/chips/level value so the displayed text stays
+-- live as the game state changes. Calling the closure gives us the
+-- current render.
+local function _extract_strings(value, acc)
+    acc = acc or {}
+    if type(value) == "string" then
+        if value ~= "" then table.insert(acc, value) end
+    elseif type(value) == "function" then
+        local ok, result = pcall(value)
+        if ok then _extract_strings(result, acc) end
+    elseif type(value) == "table" then
+        -- Plain list of strings / segments
+        for _, piece in ipairs(value) do
+            if type(piece) == "string" then
+                if piece ~= "" then table.insert(acc, piece) end
+            elseif type(piece) == "table" then
+                -- DynaText segments are {string=..., colour=..., scale=...}
+                if type(piece.string) == "string" then
+                    table.insert(acc, piece.string)
+                elseif type(piece.string) == "function" then
+                    local ok, s = pcall(piece.string)
+                    if ok and type(s) == "string" then table.insert(acc, s) end
+                end
+            end
+        end
+    end
+    return acc
+end
+
+-- Recursively walk a UIBox node tree collecting text chunks. Balatro's
+-- description nodes store their strings across MULTIPLE locations
+-- depending on node type and version:
+--   node.config.text             — static text on G.UIT.T nodes
+--   node.config.object.string    — on some Moveable objects
+--   node.config.object.strings   — DynaText's processed strings list
+--   node.config.object.config.string — DynaText's raw input segments
+-- Any of these can be a plain string, a list, or a callable closure
+-- (DynaText uses closures for live values like joker mult/chips that
+-- scale with the game state). _extract_strings handles all four shapes.
+local function _walk_ui_text(node, out, depth, visited)
+    depth = depth or 0
+    visited = visited or {}
+    if depth > 40 then return end
+    if type(node) ~= "table" then return end
+    if visited[node] then return end
+    visited[node] = true
+
+    if node.config then
+        _extract_strings(node.config.text, out)
+        local obj = node.config.object
+        if type(obj) == "table" then
+            -- All four candidate locations for DynaText text
+            _extract_strings(obj.string, out)
+            _extract_strings(obj.strings, out)
+            if type(obj.config) == "table" then
+                _extract_strings(obj.config.string, out)
+                _extract_strings(obj.config.strings, out)
+            end
+        end
+    end
+
+    -- Recurse into children. Skip `parent` to avoid cycles and `config`
+    -- (already handled above).
+    for k, v in pairs(node) do
+        if k ~= "parent" and k ~= "config" and type(v) == "table" then
+            _walk_ui_text(v, out, depth + 1, visited)
+        end
+    end
+end
+
+-- Canonical path: ask Balatro's own Card class to build the rendered
+-- description (name, main body, info) as a UIBox fragment, then extract
+-- the text. This handles Planet cards (where the hand name/level/scaling
+-- come from `card.config.center.config.hand_type` + the hand's own level
+-- table, and the center has NO loc_vars), Jokers with special-cased vars,
+-- Vouchers, Tags, etc. — whatever the game would show you on hover. We
+-- only consume abil.main (the description body) so we don't duplicate the
+-- item name (already printed by the format layer) or the badge labels
+-- (eternal/perishable — already surfaced separately in fmt_joker).
+local function _render_via_ability_table(card)
+    if not card or type(card.generate_UIBox_ability_table) ~= "function" then
+        return nil
+    end
+    local ok, abil = pcall(card.generate_UIBox_ability_table, card)
+    if not ok or type(abil) ~= "table" then return nil end
+
+    local parts = {}
+    if abil.main then _walk_ui_text(abil.main, parts) end
+    if abil.info then _walk_ui_text(abil.info, parts) end
+    -- Some set-types return the description nested under other keys
+    -- (e.g. `abil.loc_vars`-less Tags put their lines at the top level).
+    -- If main/info produced nothing, fall back to walking everything
+    -- except the name and badge subtrees.
+    if #parts == 0 then
+        for k, v in pairs(abil) do
+            if type(v) == "table" and k ~= "name" and k ~= "badges"
+                    and k ~= "card_type" and k ~= "h_popup" then
+                _walk_ui_text(v, parts)
+            end
+        end
+    end
+
+    if #parts == 0 then return nil end
+    local s = table.concat(parts, " ")
+    -- Collapse internal whitespace so we don't leak tab/newline artifacts
+    -- from UIBox layout spacing.
+    s = s:gsub("[\n\t]", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+    return s
+end
+
+-- Direct Planet fallback for when ability-table extraction isn't
+-- available (card hasn't been fully initialized, or SMODS hook has
+-- replaced generate_UIBox_ability_table in an incompatible way). Builds a
+-- human-readable sentence from the planet center's `config.hand_type`
+-- plus the current hand level values from G.GAME.hands. Never produces
+-- `?` placeholders.
+local function _render_planet_fallback(loc_ref)
+    if not loc_ref or not loc_ref.config or not loc_ref.config.hand_type then return nil end
+    local hand_type = loc_ref.config.hand_type
+    local hand = G.GAME and G.GAME.hands and G.GAME.hands[hand_type]
+    local level = (hand and hand.level) or 1
+    -- Per-level scaling lives on the hand definition (l_mult / l_chips).
+    -- Fall back to the planet's own fields if present.
+    local scale_mult = (hand and hand.l_mult) or loc_ref.mult or loc_ref.l_mult
+    local scale_chips = (hand and hand.l_chips) or loc_ref.chips or loc_ref.l_chips
+    local mult_part = scale_mult and ("+" .. tostring(scale_mult) .. " Mult") or ""
+    local chips_part = scale_chips and ("+" .. tostring(scale_chips) .. " Chips") or ""
+    local joiner = (mult_part ~= "" and chips_part ~= "") and " and " or ""
+    return string.format(
+        "(Lvl %d) Levels up %s: %s%s%s per use",
+        level, hand_type, mult_part, joiner, chips_part
+    )
+end
+
 function State.render_description(set, key, loc_ref, card)
+    -- PREFERRED: canonical Balatro render via the Card's ability table.
+    -- This handles Planets, Jokers, Vouchers, Tarots, Spectrals — anything
+    -- with per-card variable substitution. Only available when we have a
+    -- live Card instance (not for tags or blinds, which go through the
+    -- loc_vars path below).
+    if card then
+        local rendered = _render_via_ability_table(card)
+        if rendered and rendered ~= "" then
+            -- strip_markup is idempotent; if the ability table produced
+            -- any stray {C:..} fragments (SMODS adds custom markup
+            -- occasionally), scrub them.
+            return strip_markup(rendered)
+        end
+    end
+
+    -- Planet-specific fallback: if ability-table extraction failed but
+    -- the center clearly identifies a poker hand, synthesize the
+    -- description ourselves. Without this we'd emit `Level up ? +? Mult`,
+    -- which is useless to a model trying to decide whether to use the
+    -- planet now or save it for later.
+    if set == "Planet" then
+        local p = _render_planet_fallback(loc_ref)
+        if p then return p end
+    end
+
     if not set or not key then return "" end
     if not (G and G.localization and G.localization.descriptions) then return "" end
     local bucket = G.localization.descriptions[set]
@@ -110,7 +292,8 @@ function State.render_description(set, key, loc_ref, card)
     if not loc or not loc.text then return "" end
 
     -- Ask the center for its substitution vars. This is how Balatro's own
-    -- UI resolves per-joker numeric placeholders.
+    -- UI resolves per-joker numeric placeholders for cards whose centers
+    -- implement `loc_vars()` directly (most Jokers, some consumables).
     local vars = {}
     if loc_ref and type(loc_ref.loc_vars) == "function" then
         local info_queue = {}
@@ -122,7 +305,43 @@ function State.render_description(set, key, loc_ref, card)
 
     local rendered = substitute_vars(loc.text, vars)
     local s = table.concat(rendered, " ")
-    return strip_markup(s)
+    s = strip_markup(s)
+
+    -- TRAILING-NIL DISCLOSURE: even after substitute_vars, `?` markers
+    -- can remain in two cases:
+    --   1. loc_vars returned a sparse table where the missing index is
+    --      at the tail (e.g. `{15, nil}` in Lua has no index 2 stored;
+    --      pairs() sees max_idx == 1 and we substitute #1# but leave
+    --      #2# for the `?` fallback).
+    --   2. loc_vars wasn't defined on the center at all and returned no
+    --      vars.
+    -- In both cases the model reads something like "+15 Mult when ?
+    -- discards remaining", which is actively harmful — the model
+    -- doesn't know if "?" is a small number or a large one, whether
+    -- the joker is situational, etc.
+    --
+    -- Best we can do without refactoring loc_vars is DUMP the raw
+    -- ability.extra key/value pairs next to the description so the
+    -- model at least sees the numbers that exist, in a format it can
+    -- read. Only fires when the rendered description still has `?`
+    -- (the common case is zero).
+    if s:find("?") and card and type(card.ability) == "table"
+            and type(card.ability.extra) == "table" then
+        local pairs_list = {}
+        for k, v in pairs(card.ability.extra) do
+            if type(v) == "number" or type(v) == "string" or type(v) == "boolean" then
+                table.insert(pairs_list, tostring(k) .. "=" .. tostring(v))
+            end
+        end
+        -- Sort alphabetically so output is stable across runs (Lua
+        -- pairs() iteration order isn't guaranteed).
+        table.sort(pairs_list)
+        if #pairs_list > 0 then
+            s = s .. " [raw values: " .. table.concat(pairs_list, ", ") .. "]"
+        end
+    end
+
+    return s
 end
 
 -- Rank display names

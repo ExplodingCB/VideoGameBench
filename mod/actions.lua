@@ -49,6 +49,100 @@ local function highlight_cards(indices)
     return true
 end
 
+-- Inspect a consumable card and return how many hand-card targets it
+-- operates on. MOST targeted spectrals/tarots use Balatro's standard
+-- `ability.consumeable.max_highlighted` field (Deja Vu, Trance, Medium,
+-- Talisman, Hanged Man, Death, The Lovers, The Chariot, The Tower, etc).
+-- BUT a few (Cryptid in particular) encode the requirement as a
+-- `can_use()` method on the center rather than a field. Those are NOT
+-- caught here — for belt-and-suspenders safety, `ask_can_use()` below
+-- does the real gatekeeping before we invoke use_card.
+--
+-- Returns: max (number, how many cards it targets at most — 0 if none).
+local function targeted_card_count(card)
+    if not card then return 0 end
+    local ability = card.ability
+    if type(ability) ~= "table" then return 0 end
+    local cons = ability.consumeable
+    if type(cons) ~= "table" then return 0 end
+    local n = cons.max_highlighted
+    if type(n) ~= "number" then return 0 end
+    return n
+end
+
+-- Ask Balatro itself whether a consumable card is usable RIGHT NOW.
+-- This is the canonical check the in-game "Use" button performs: it
+-- calls the center's `can_use(self, card)` method. The method
+-- encapsulates every precondition — required highlighted cards
+-- (Cryptid wants exactly 1 highlighted, Deja Vu wants 1, etc.),
+-- required free joker/consumable slots (Soul, Ankh, Wraith want a
+-- joker slot), ante gates, pool-exhaustion checks, and so on.
+--
+-- Returns: (true/false, optional_reason). True means use_card is safe
+-- to call. False means the card would crash or no-op — the mod returns
+-- an error to the runner instead of invoking use_card.
+local function ask_can_use(card)
+    if not card then return false, "card is nil" end
+    local center = card.config and card.config.center
+    if not center or type(center.can_use) ~= "function" then
+        -- No can_use on the center → either this isn't a consumable,
+        -- or the center lacks the preflight check. Default to allowing
+        -- the call (the outer pcall wrap will catch crashes).
+        return true, nil
+    end
+    local ok, result = pcall(center.can_use, center, card)
+    if not ok then
+        -- The can_use check itself errored. Treat as usable-by-default
+        -- so we don't block legitimate calls just because Balatro's
+        -- predicate threw.
+        return true, nil
+    end
+    -- IMPORTANT: treat ANY falsy result as "cannot use", not just the
+    -- literal boolean false. Some centers return `nil` (via
+    -- `if cond then return true end` with no else branch) when
+    -- preconditions aren't met — and nil used to slip through our old
+    -- `result == false` check, letting Deja Vu run without a target
+    -- and crash Balatro at card.lua:1411.
+    if not result then
+        return false, "Balatro's can_use() returned " .. tostring(result)
+    end
+    return true, nil
+end
+
+-- Safely invoke G.FUNCS.use_card. Three layers of defense:
+--   1. Preflight `can_use` check (catches Cryptid / Soul / slot-gated
+--      consumables that Balatro itself would reject in-UI).
+--   2. `pcall` around the actual use_card call (catches unknown future
+--      bugs in Balatro's consumable logic — notably Deja Vu's
+--      `conv_card` nil dereference at card.lua:1411 which used to
+--      hard-crash the entire game process).
+--   3. Caller-side target validation via `targeted_card_count()` for
+--      the SIMPLE max_highlighted case, so we can give specific error
+--      messages ("Deja Vu needs 1 target") instead of the generic
+--      "can_use returned false" when we know exactly what's missing.
+local function safe_use_card(card)
+    if not G.FUNCS or not G.FUNCS.use_card then
+        return false, "G.FUNCS.use_card missing"
+    end
+    local usable, reason = ask_can_use(card)
+    if not usable then
+        local name = (card.ability and card.ability.name) or "This card"
+        return false, string.format(
+            "%s cannot be used right now (%s). Common causes: missing "
+            .. "highlighted hand cards, no free joker/consumable slots, "
+            .. "or an ante/round precondition not met. For targeted "
+            .. "spectrals like Cryptid, Deja Vu, Trance, Medium, The "
+            .. "Lovers, Death, etc., include a `cards` array with the "
+            .. "hand indices to target.",
+            name, reason or "unspecified")
+    end
+    local ok, err = pcall(G.FUNCS.use_card, {config = {ref_table = card}})
+    if not ok then
+        return false, tostring(err)
+    end
+    return true, nil
+end
+
 ---------------------------------------------------------------------------
 -- Action: Play cards
 ---------------------------------------------------------------------------
@@ -252,6 +346,15 @@ function Actions.skip(data)
 
     -- During blind select
     if G.STATE == G.STATES.BLIND_SELECT then
+        -- Balatro does not allow skipping the Boss Blind. The UI has no skip
+        -- button on Boss, and the direct-state fallback below would otherwise
+        -- no-op (skip_to resolves back to "Boss"), leaving the state unchanged
+        -- and causing weak models to loop on `skip` indefinitely. Reject it
+        -- explicitly so the model gets feedback instead of a silent no-op.
+        if G.GAME.blind_on_deck == "Boss" then
+            return {error = "Boss Blind cannot be skipped. Use `select` to play it."}
+        end
+
         local deck = string.lower(G.GAME.blind_on_deck or "Small")
         local blind_uibox = G.blind_select_opts and G.blind_select_opts[deck]
 
@@ -377,8 +480,18 @@ function Actions.buy(data)
             if G.GAME.dollars < card.cost then
                 return {error = "Not enough money for voucher"}
             end
-            if G.FUNCS.buy_from_shop then
-                G.FUNCS.buy_from_shop({config = {ref_table = card}})
+            -- IMPORTANT: vouchers are REDEEMED via use_card, NOT bought via
+            -- buy_from_shop. The in-game "Redeem" button's click handler is
+            -- G.FUNCS.use_card; buy_from_shop is for jokers/consumables that
+            -- get added to an inventory slot. When we misused buy_from_shop
+            -- on a voucher, Balatro tried to shove the voucher card into the
+            -- joker tray as if it were a consumable, producing the visual
+            -- "voucher in joker slot" artifact (see earlier screenshot).
+            -- safe_use_card pcall-wraps the call so a failed redeem can't
+            -- take down the game process.
+            local ok, err = safe_use_card(card)
+            if not ok then
+                return {error = "use_card (voucher redeem) failed: " .. tostring(err)}
             end
             return {success = true, action = "buy", type = "voucher", index = index}
         else
@@ -397,8 +510,11 @@ function Actions.buy(data)
             -- (ease_dollars(-self.cost) in card.lua). Going through buy_from_shop
             -- would double-charge: buy_from_shop's ease_dollars(-c1.cost) PLUS
             -- Card:open()'s ease_dollars(-self.cost).
-            if G.FUNCS.use_card then
-                G.FUNCS.use_card({config = {ref_table = card}})
+            -- Using safe_use_card keeps a pack-open crash (extremely rare but
+            -- possible with modded pack contents) from taking down the game.
+            local ok, err = safe_use_card(card)
+            if not ok then
+                return {error = "use_card (pack open) failed: " .. tostring(err)}
             end
             return {success = true, action = "buy", type = "pack", index = index}
         else
@@ -475,7 +591,12 @@ function Actions.use(data)
 
     local card = G.consumeables.cards[slot]
 
-    -- If targeting hand cards, highlight them first
+    -- If the consumable requires targets (e.g. Deja Vu needs 1 hand card
+    -- to attach a Red Seal to), validate BEFORE calling use_card.
+    -- Skipping this crashes Balatro outright — see safe_use_card comment.
+    local required_targets = targeted_card_count(card)
+    local provided = (data.cards and #data.cards) or 0
+
     if data.cards and #data.cards > 0 then
         if G.hand and G.hand.cards then
             local max = #G.hand.cards
@@ -487,9 +608,19 @@ function Actions.use(data)
         unhighlight_all()
     end
 
-    -- Use the consumable
-    if G.FUNCS.use_card then
-        G.FUNCS.use_card({config = {ref_table = card}})
+    if required_targets > 0 and provided == 0 then
+        local name = (card.ability and card.ability.name) or "This consumable"
+        return {error = string.format(
+            "%s targets up to %d card(s) in hand but none were provided. "
+            .. "Re-send with a `cards` array of hand indices, e.g. {\"action\":\"use\",\"slot\":%d,\"cards\":[1]}",
+            name, required_targets, slot)}
+    end
+
+    -- Use the consumable. pcall-wrapped so a malformed target (edge case
+    -- we didn't anticipate) returns a clean error instead of crashing.
+    local ok, err = safe_use_card(card)
+    if not ok then
+        return {error = "use_card failed: " .. tostring(err)}
     end
 
     return {success = true, action = "use", slot = slot, cards = data.cards}
@@ -735,17 +866,46 @@ function Actions.pack_select(data)
 
     -- For standard packs, need to check for card targeting
     if G.STATE == G.STATES.STANDARD_PACK then
-        -- Standard pack cards are added to deck directly
+        -- Standard pack cards are added to deck directly. Wrap in pcall
+        -- defensively (Balatro's buy_from_shop has fewer known crash
+        -- paths but "belt and suspenders" here is cheap insurance).
         if G.FUNCS.buy_from_shop then
-            G.FUNCS.buy_from_shop({config = {ref_table = card}})
+            local ok, err = pcall(G.FUNCS.buy_from_shop, {config = {ref_table = card}})
+            if not ok then
+                return {error = "buy_from_shop (standard pack) failed: " .. tostring(err)}
+            end
         end
     else
-        -- Consumable packs - use the card
+        -- Consumable packs. A subset of the spectrals/tarots inside need
+        -- hand-card targets (Deja Vu → Red Seal, The Lovers → Wild,
+        -- Death → rank conversion, etc.). Without targets, Balatro
+        -- crashes at card.lua:1411 `conv_card` dereference. We check the
+        -- card's `ability.consumeable.max_highlighted` and either
+        -- highlight the provided targets or reject the action before
+        -- ever invoking use_card.
+        local required_targets = targeted_card_count(card)
+        local provided = (data.cards and #data.cards) or 0
+
         if data.cards and #data.cards > 0 and G.hand and G.hand.cards then
             highlight_cards(data.cards)
+        else
+            unhighlight_all()
         end
-        if G.FUNCS.use_card then
-            G.FUNCS.use_card({config = {ref_table = card}})
+
+        if required_targets > 0 and provided == 0 then
+            local name = (card.ability and card.ability.name) or "This card"
+            return {error = string.format(
+                "%s needs up to %d target card(s) from your hand before it can be taken. "
+                .. "Re-send the select with a `cards` array of hand indices, "
+                .. "e.g. {\"action\":\"select\",\"index\":%d,\"cards\":[1]}. "
+                .. "Not all spectrals/tarots need targets — non-targeting ones "
+                .. "(Wraith, Ankh, Hex, Soul, Black Hole, etc.) work without `cards`.",
+                name, required_targets, index)}
+        end
+
+        local ok, err = safe_use_card(card)
+        if not ok then
+            return {error = "use_card (pack_select) failed: " .. tostring(err)}
         end
     end
 

@@ -110,9 +110,23 @@
   }
   .panel h2 + * { border-radius: 0 0 9px 9px; margin-top: 0; }
 
-  .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-end; }
+  /* Top-align labels across the row. Older `flex-end` made columns
+     with extra content (e.g. a datalist-hint below the Model input)
+     force shorter columns to pad at the top, which pushed the labels
+     out of alignment. `flex-start` keeps every label in the same Y,
+     and any hint sits naturally below its own column without tugging
+     the layout around. */
+  .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-start; }
   .col { display: flex; flex-direction: column; gap: 6px; }
-  .col label { font-size: 14px; color: var(--text-muted); letter-spacing: 0.5px; }
+  /* Each col claims a consistent minimum width so Stake/Runs don't get
+     squeezed into a tiny strip when Model's input grows. */
+  .col { min-width: 110px; }
+  .col label { font-size: 14px; color: var(--text-muted); letter-spacing: 0.5px;
+               min-height: 20px; /* reserve label height even if we use &nbsp; */
+             }
+  /* The hint directly under an input shouldn't fight other cols for space.
+     It's reference text, not layout-load-bearing. */
+  .col .datalist-hint { min-height: 18px; }
 
   /* Inputs = cream with a chunky dark border, like Balatro's text entry */
   input, select {
@@ -128,6 +142,24 @@
   }
   input[type=number] { width: 110px; }
   input.wide { width: 380px; }
+  /* Checkboxes are native widgets — the chunky input border we use for
+     text fields turns them into ugly bordered squares in Firefox/Chrome
+     when applied uniformly. Reset to browser defaults. */
+  input[type=checkbox] {
+    all: revert;
+    cursor: inherit;
+    accent-color: var(--balatro-red);
+    width: 18px; height: 18px;
+    vertical-align: middle;
+    margin: 0;
+  }
+
+  /* Per-row delete ✕ button on the history table. Subtle until hover.
+     Matches the balatro-red accent used for destructive actions. */
+  .history-delete:hover {
+    background: rgba(254,95,85,0.15) !important;
+    border-color: var(--balatro-red) !important;
+  }
 
   /* Chunky Balatro buttons — big, bold, drop shadow, lift on hover, press on click */
   button {
@@ -326,6 +358,40 @@
   .history-table .model-cell { max-width: 260px; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
 
+  /* Leaderboard chart — same Balatro watermark treatment as the per-run
+     charts on each run card. Cream sheet with the game logo dimmed to
+     ~22% behind the bars, plus a soft cream overlay so the plotted bars
+     read cleanly on top. Chunky outer border matches the panel inset
+     styling used elsewhere. */
+  #leaderboard-chart-host {
+    position: relative;
+    background-image: url("/static/balatro/textures/balatro.png");
+    background-repeat: no-repeat;
+    background-position: center 56%;
+    background-size: 36% auto;
+    background-blend-mode: multiply;
+    border: 2px solid var(--panel-grey);
+    border-radius: 7px;
+    padding: 4px;
+  }
+  #leaderboard-chart-host::before {
+    content: ""; position: absolute; inset: 0;
+    background: rgba(240,230,194,0.82);
+    pointer-events: none;
+    border-radius: 7px;
+  }
+  #leaderboard-chart-host canvas { position: relative; z-index: 1; }
+
+  /* Leaderboard table: same cream-sheet look as history, but the top
+     row highlights with a subtle Balatro-gold tint since rank-1 matters. */
+  #leaderboard-table tbody tr:first-child {
+    background: rgba(234,192,88,0.14);
+  }
+  #leaderboard-table tbody tr:first-child td:first-child {
+    color: var(--balatro-red); font-weight: normal;
+    text-shadow: 2px 2px 0 rgba(55,66,68,0.18);
+  }
+
   .pill {
     display: inline-block; padding: 2px 10px; border-radius: 7px;
     font-size: 13px; letter-spacing: 0.5px;
@@ -353,10 +419,24 @@
     <h2>Start a Batch</h2>
     <div class="row">
       <div class="col">
+        <label for="provider">Provider</label>
+        <select id="provider">
+          <!-- OpenRouter routes through their aggregator (unchanged
+               behavior); the other options hit the vendor API directly,
+               which is cheaper + faster but needs a per-vendor key. -->
+          <option value="openrouter">OpenRouter</option>
+          <option value="openai">OpenAI (direct)</option>
+          <option value="anthropic">Anthropic (direct)</option>
+          <option value="google">Google Gemini (direct)</option>
+          <option value="inception">Inception Labs (direct)</option>
+          <option value="cerebras">Cerebras (direct)</option>
+        </select>
+      </div>
+      <div class="col">
         <label for="model">Model</label>
-        <input id="model" class="wide" list="models-list" placeholder="e.g. arcee-ai/trinity-large-preview:free" />
+        <input id="model" class="wide" list="models-list" placeholder="Pick a model…" />
         <datalist id="models-list"></datalist>
-        <div class="datalist-hint" id="models-hint">Loading OpenRouter catalog…</div>
+        <div class="datalist-hint" id="models-hint">Loading catalog…</div>
       </div>
       <div class="col">
         <label for="deck">Deck</label>
@@ -377,12 +457,22 @@
         <input id="runs" type="number" min="1" max="100" value="5" />
       </div>
       <div class="col">
-        <label for="api-key">API Key (optional)</label>
-        <input id="api-key" type="password" placeholder="uses OPENROUTER_API_KEY env" />
+        <label for="api-key">
+          <span id="api-key-label">API Key (OpenRouter)</span>
+        </label>
+        <input id="api-key" type="password" placeholder="Paste key and tab out to save" />
+        <div class="datalist-hint" id="api-key-hint">&nbsp;</div>
       </div>
-      <div class="col" style="justify-content:flex-end">
-        <label title="Kill + relaunch Balatro before every run. Slower but guarantees a clean mod state.">
-          <input id="auto-restart" type="checkbox" checked style="margin-right:6px;vertical-align:middle" />
+      <div class="col">
+        <!-- Spacer label keeps the checkbox vertically aligned with the
+             other form inputs on the row (which sit under their own
+             labels). Without this the checkbox would float to the top
+             once we switched the row to align-items: flex-start. -->
+        <label>&nbsp;</label>
+        <label title="Kill + relaunch Balatro before every run. Slower but guarantees a clean mod state."
+               style="white-space:nowrap;display:flex;align-items:center;gap:6px;
+                      height:44px;padding:0 4px;">
+          <input id="auto-restart" type="checkbox" checked style="vertical-align:middle" />
           Auto-restart Balatro
         </label>
       </div>
@@ -406,12 +496,64 @@
   </div>
 
   <div class="panel">
-    <h2>Run History</h2>
+    <h2>
+      Run History
+      <span style="font-size:13px;font-weight:normal;color:#6b6755;margin-left:8px">
+        <a href="#" id="bulk-delete-link" style="color:var(--balatro-red);text-decoration:none">
+          (select rows to delete)
+        </a>
+      </span>
+    </h2>
     <table class="history-table" id="history-table">
       <thead><tr>
+        <th style="width:28px"><input type="checkbox" id="history-select-all"
+             title="Select all visible rows" /></th>
         <th>Time</th><th>Model</th><th>Deck</th><th>Stake</th><th>Result</th>
         <th>Ante</th><th>Furthest Blind</th><th>Rounds</th>
         <th>Actions</th><th>Duration</th><th>Tokens</th>
+        <th title="BalatroBench Rating: composite 0-100 score weighting rounds_won (55%), token efficiency (30%), best hand chips (15%)">Rating</th>
+        <th style="width:32px" title="Delete this run">&nbsp;</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <!-- Bulk-action bar appears only when rows are checked. Keeping it
+         inside the panel body so it doesn't look detached. -->
+    <!-- Bulk-action bar: hidden until at least one row is checked. `display`
+         toggles between `none` and `flex` in JS (`historyBulkBar.style.display`).
+         `align-items:center` only applies when flex is active. -->
+    <div id="history-bulk-bar"
+         style="display:none;margin-top:10px;padding:10px 14px;
+                background:var(--panel-grey);border:2px solid var(--panel-black);
+                border-radius:9px;align-items:center;gap:14px">
+      <span><b id="history-bulk-count">0</b> run(s) selected</span>
+      <button id="history-bulk-delete" class="danger" style="padding:6px 14px;font-size:14px">Delete Selected</button>
+      <button id="history-bulk-clear"  style="padding:6px 14px;font-size:14px">Clear</button>
+    </div>
+  </div>
+
+  <!-- Leaderboard: per-model average BalatroBench Rating across all runs.
+       Populated from /api/leaderboard on page load + whenever a run
+       finishes. Chart + table stay in sync via renderLeaderboard(). -->
+  <div class="panel" id="leaderboard-panel">
+    <h2>
+      Model Leaderboard
+      <span style="font-size:13px;font-weight:normal;color:#6b6755;margin-left:8px">
+        BalatroBench Rating · 0-100 · rounds 55% · tokens 30% · chips 15%
+      </span>
+    </h2>
+    <!-- The chart host: tall enough to give each bar breathing room for
+         its value label. Overflow-x scroll kicks in if there are too many
+         models to fit at ~80px each. The visual treatment (Balatro logo
+         watermark, cream overlay, dashed border) comes from the
+         #leaderboard-chart-host CSS block above. -->
+    <div id="leaderboard-chart-host"
+         style="height:420px;margin-bottom:20px;overflow-x:auto;overflow-y:hidden">
+      <canvas id="leaderboard-chart"></canvas>
+    </div>
+    <table class="history-table" id="leaderboard-table">
+      <thead><tr>
+        <th>Rank</th><th>Model</th><th>Avg Rating</th><th>Best</th>
+        <th>Runs</th><th>Wins</th><th>Avg Ante</th><th>Avg Tokens</th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -467,9 +609,39 @@ Chart.register({
 // ---------------------------------------------------------------------------
 // Load models + settings
 // ---------------------------------------------------------------------------
-async function loadModels() {
+// Where we cache the per-provider catalog so switching back/forth in the
+// dropdown doesn't re-hit the network every time. The OpenRouter catalog
+// is especially expensive — 500+ models, ~200KB — so we only fetch once.
+const _modelCatalogCache = {};
+
+// Human-readable descriptions per provider, shown in the "X models
+// available from Y" hint below the model picker.
+const PROVIDER_LABELS = {
+  openrouter: "OpenRouter aggregator",
+  openai: "OpenAI direct",
+  anthropic: "Anthropic direct",
+  google: "Google Gemini direct",
+  inception: "Inception Labs direct",
+  cerebras: "Cerebras direct",
+};
+
+// Resolve which provider the user currently has selected. Small helper
+// so the rest of the code can just call `currentProvider()`.
+const currentProvider = () => ($("#provider") && $("#provider").value) || "openrouter";
+
+// Populate the <datalist> behind #model with the catalog for the given
+// provider. OpenRouter hits the aggregator's /models endpoint (which
+// backs /api/models?provider=openrouter on our side); direct vendors get
+// the curated list we maintain in webapp.py.
+async function loadModels(provider) {
+  provider = provider || currentProvider();
+  $("#models-hint").textContent = `Loading ${PROVIDER_LABELS[provider] || provider} catalog…`;
   try {
-    const data = await api("/api/models");
+    let data = _modelCatalogCache[provider];
+    if (!data) {
+      data = await api(`/api/models?provider=${encodeURIComponent(provider)}`);
+      _modelCatalogCache[provider] = data;
+    }
     const list = $("#models-list");
     list.innerHTML = "";
     for (const m of data.models) {
@@ -478,20 +650,94 @@ async function loadModels() {
       opt.label = m.name;
       list.appendChild(opt);
     }
-    $("#models-hint").textContent = `${data.models.length} models available from OpenRouter`;
+    const n = data.models.length;
+    if (n === 0) {
+      $("#models-hint").textContent = `No preset models for ${PROVIDER_LABELS[provider] || provider} — type a model ID by hand.`;
+    } else {
+      $("#models-hint").textContent = `${n} model${n === 1 ? "" : "s"} available from ${PROVIDER_LABELS[provider] || provider}.`;
+    }
   } catch (e) {
     $("#models-hint").textContent = `Couldn't load model list: ${e.message}`;
   }
 }
 
+// Cache of the full settings blob so we can swap the API-key input's
+// displayed value as the user changes providers without another fetch.
+let _settingsCache = null;
+
+// Which settings field holds the key for `provider`. Legacy openrouter
+// installs also accept the `api_key` field for backward compat.
+function _keyFieldFor(provider) {
+  return `api_key_${provider}`;
+}
+
+// API-key hint text. Lists the env-var fallback and a direct vendor
+// link, so a user who landed here without a key knows where to get one.
+const PROVIDER_KEY_HINTS = {
+  openrouter: "Get one at https://openrouter.ai/keys · env: OPENROUTER_API_KEY",
+  openai:     "Get one at https://platform.openai.com/api-keys · env: OPENAI_API_KEY",
+  anthropic:  "Get one at https://console.anthropic.com/settings/keys · env: ANTHROPIC_API_KEY",
+  google:     "Get one at https://aistudio.google.com/apikey · env: GOOGLE_API_KEY",
+  inception:  "Get one at https://platform.inceptionlabs.ai · env: INCEPTION_API_KEY",
+  cerebras:   "Get one at https://cloud.cerebras.ai · env: CEREBRAS_API_KEY",
+};
+
+// Sync the API-key input + label + hint to the currently-selected
+// provider. Called when the user switches providers or when settings
+// are first loaded.
+function refreshApiKeyField() {
+  const provider = currentProvider();
+  const friendly = {
+    openrouter: "OpenRouter", openai: "OpenAI",
+    anthropic: "Anthropic",   google: "Google",
+    inception: "Inception",   cerebras: "Cerebras",
+  }[provider] || provider;
+  $("#api-key-label").textContent = `API Key (${friendly})`;
+  $("#api-key-hint").textContent = PROVIDER_KEY_HINTS[provider] || "";
+  const s = _settingsCache || {};
+  const val = s[_keyFieldFor(provider)]
+           || (provider === "openrouter" ? (s.api_key || "") : "");
+  $("#api-key").value = val;
+  // Placeholder tells the user whether the key is saved vs empty
+  $("#api-key").placeholder = val
+    ? "Saved. Paste a new one to change."
+    : "Paste key and tab out to save.";
+}
+
 async function loadSettings() {
   const s = await api("/api/settings");
+  _settingsCache = s;
   $("#model").value = s.model;
   $("#deck").value = s.deck;
   $("#stake").value = s.stake;
   $("#runs").value = s.runs;
   $("#auto-restart").checked = s.auto_restart_balatro !== false;
-  if (s.api_key) $("#api-key").value = s.api_key;
+  if (s.provider && $("#provider")) $("#provider").value = s.provider;
+  refreshApiKeyField();
+}
+
+// Auto-save the API key when the user tabs out of (blurs) the input.
+// We save against the CURRENT provider — switching providers first then
+// typing a key saves to the new provider's slot. No explicit save button.
+async function saveCurrentApiKey() {
+  const provider = currentProvider();
+  const val = $("#api-key").value;
+  const field = _keyFieldFor(provider);
+  const updates = { [field]: val };
+  // Also write the legacy `api_key` field for openrouter so old callers
+  // that still check `settings.api_key` keep working.
+  if (provider === "openrouter") updates.api_key = val;
+  try {
+    const saved = await api("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    });
+    _settingsCache = saved;
+    refreshApiKeyField();
+  } catch (e) {
+    console.warn("key save failed", e);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +960,36 @@ function handleRunEvent(runId, evt) {
       finishReason: evt.finish_reason,
       stateText: stateText,
     });
+  } else if (evt.type === "compaction_started") {
+    // The transcript has crossed the context-window threshold; the harness
+    // is about to make a one-off summarization call. Surface it in the
+    // thinking log so it's obvious when memory has been compressed.
+    appendThinkingEntry(entry, {
+      turnLabel: `compaction`,
+      attempt: 1,
+      ok: true,
+      body: `Compacting transcript: prior prompt was ${evt.prompt_tokens_before?.toLocaleString?.() || evt.prompt_tokens_before} tokens (window ${evt.context_window?.toLocaleString?.()}); ${evt.history_turns} raw turns will be summarized.`,
+      action: null,
+    });
+  } else if (evt.type === "compaction_done") {
+    appendThinkingEntry(entry, {
+      turnLabel: `compaction complete`,
+      attempt: 1,
+      ok: true,
+      body: evt.summary || "(empty summary)",
+      action: null,
+      promptTokens: evt.prompt_tokens,
+      completionTokens: evt.completion_tokens,
+      elapsed: evt.elapsed_seconds,
+    });
+  } else if (evt.type === "compaction_error") {
+    appendThinkingEntry(entry, {
+      turnLabel: `compaction failed`,
+      attempt: 1,
+      ok: false,
+      body: `Compaction call failed: ${evt.error}. Continuing with uncompressed transcript.`,
+      action: null,
+    });
   } else if (evt.type === "run_finished") {
     entry.finished = true;
     const r = evt.record?.result || {};
@@ -807,6 +1083,18 @@ function renderTally(entry) {
 // Job polling + lifecycle
 // ---------------------------------------------------------------------------
 let lastSeenRunIds = [];
+// Remember the previous poll's status so we can detect TRANSITIONS
+// (running → finished) rather than re-running history-refresh work on
+// every tick while the job sits in a terminal state. Without this, the
+// 1.5s poll interval tears down and rebuilds the entire Chart.js
+// leaderboard every 1.5 seconds as long as any finished job is the
+// "current" job — pinning the CPU and making hover tooltips flicker.
+let lastPollStatus = null;
+// Also track the number of run_ids seen. When a mid-job run completes
+// (status is still "running" but a new finished run got appended to
+// results.jsonl), we DO want to refresh — matching against the run_id
+// count is how we know a new record was written.
+let lastPollFinishedRunCount = 0;
 
 async function pollStatus() {
   try {
@@ -848,11 +1136,22 @@ async function pollStatus() {
       }
     }
 
-    // When the job is done, refresh history and — if starting a new batch —
-    // clear the active panel on the NEXT start click (not automatically).
-    if (["finished", "failed", "stopped"].includes(job.status)) {
+    // Refresh history/leaderboard ONLY on meaningful transitions:
+    //   1. The job just entered a terminal state (finished/failed/stopped)
+    //   2. A new completed run got logged while a multi-run batch is
+    //      still running (so the leaderboard reflects partial progress)
+    // Both are edge-triggered. Sitting in "finished" for an hour does
+    // nothing; the leaderboard is already up-to-date.
+    const terminalStatuses = ["finished", "failed", "stopped"];
+    const justFinished = terminalStatuses.includes(job.status)
+                          && !terminalStatuses.includes(lastPollStatus);
+    const newRunDuringBatch = job.status === "running"
+                          && job.run_ids.length > lastPollFinishedRunCount;
+    if (justFinished || newRunDuringBatch) {
       await loadHistory();
     }
+    lastPollStatus = job.status;
+    lastPollFinishedRunCount = job.run_ids.length;
   } catch (e) {
     console.warn("status poll failed", e);
   }
@@ -865,12 +1164,20 @@ async function loadHistory() {
     tbody.innerHTML = "";
     for (const r of data.runs.slice(0, 100)) {
       const tr = document.createElement("tr");
+      tr.dataset.runId = r.run_id || "";
       const won = r.result?.won;
       const aborted = r.result?.aborted;
       const resultCell = aborted
         ? `<span class="pill" style="background:var(--warn);color:#000">STOP</span>`
         : `<span class="pill ${won ? "win" : "loss"}">${won ? "WIN" : "LOSS"}</span>`;
+      // Rating from /api/runs comes scored already (backend score_run).
+      const rating = r.rating?.rating;
+      const comp = r.rating?.components;
+      const ratingCell = rating === undefined ? "—"
+        : `<span title="R=${comp?.round_factor} · T=${comp?.token_factor} · C=${comp?.chip_factor}"
+                 style="font-weight:600">${rating.toFixed(1)}</span>`;
       tr.innerHTML = `
+        <td><input type="checkbox" class="history-select" data-run-id="${r.run_id || ""}" /></td>
         <td>${(r.timestamp || "").replace("T", " ").replace("Z", "")}</td>
         <td class="model-cell" title="${r.model}">${r.model}</td>
         <td>${r.config?.deck || ""}</td>
@@ -882,12 +1189,485 @@ async function loadHistory() {
         <td>${r.result?.total_actions ?? 0} (${r.result?.invalid_actions ?? 0} inv.)</td>
         <td>${r.timing?.total_seconds ?? 0}s</td>
         <td>${fmt(r.tokens?.total_tokens)}</td>
+        <td>${ratingCell}</td>
+        <td style="text-align:center">
+          <button class="history-delete" data-run-id="${r.run_id || ""}"
+                  title="Delete this run"
+                  style="padding:2px 8px;font-size:14px;line-height:1;
+                         background:transparent;border:2px solid transparent;
+                         color:var(--balatro-red);box-shadow:none;
+                         cursor:pointer">✕</button>
+        </td>
       `;
       tbody.appendChild(tr);
     }
+    updateBulkBar();  // reset the checked-row indicator after re-render
+    // Leaderboard refreshes on the same cadence — it reads the same
+    // underlying results.jsonl but aggregates per-model.
+    await loadLeaderboard();
   } catch (e) {
     console.warn("history load failed", e);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Delete-run handlers
+// ---------------------------------------------------------------------------
+// Three entry points:
+//   1. Per-row ✕ button → confirm → DELETE /api/run/<id>
+//   2. Header checkbox → select/deselect all visible rows
+//   3. Bulk-delete bar (only visible when any row is checked) → confirm →
+//      POST /api/runs/delete with the array of checked IDs
+// Every path ends with loadHistory() so the table AND the leaderboard
+// chart both refresh immediately.
+
+function selectedRunIds() {
+  return Array.from(document.querySelectorAll(".history-select:checked"))
+    .map(cb => cb.dataset.runId)
+    .filter(Boolean);
+}
+
+function updateBulkBar() {
+  const ids = selectedRunIds();
+  const bar = $("#history-bulk-bar");
+  if (!bar) return;
+  $("#history-bulk-count").textContent = ids.length;
+  bar.style.display = ids.length > 0 ? "flex" : "none";
+}
+
+async function deleteRuns(runIds) {
+  if (!runIds || !runIds.length) return;
+  const many = runIds.length > 1;
+  const msg = many
+    ? `Delete ${runIds.length} runs? This removes them from results.jsonl and wipes their event logs. Cannot be undone.`
+    : `Delete this run? Its event log will also be removed. Cannot be undone.`;
+  if (!confirm(msg)) return;
+  try {
+    if (runIds.length === 1) {
+      const rid = runIds[0];
+      await api(`/api/run/${encodeURIComponent(rid)}`, { method: "DELETE" });
+    } else {
+      await api("/api/runs/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_ids: runIds }),
+      });
+    }
+  } catch (e) {
+    alert(`Couldn't delete: ${e.message}`);
+    return;
+  }
+  await loadHistory();
+}
+
+// Event delegation: one listener on the table body catches per-row
+// ✕ clicks and row checkbox changes, so we don't need to re-attach
+// listeners every time loadHistory re-renders the rows.
+document.addEventListener("click", async (e) => {
+  const delBtn = e.target.closest?.(".history-delete");
+  if (delBtn) {
+    e.preventDefault();
+    const rid = delBtn.dataset.runId;
+    if (rid) await deleteRuns([rid]);
+  }
+});
+document.addEventListener("change", (e) => {
+  if (e.target?.classList?.contains("history-select")) {
+    updateBulkBar();
+  }
+});
+
+// Set up the one-time listeners for the header checkbox + bulk bar.
+// Wrapped in DOMContentLoaded guard isn't needed here because this
+// script runs after the elements it references.
+(function setupBulkDelete() {
+  const selectAll = document.getElementById("history-select-all");
+  if (selectAll) {
+    selectAll.addEventListener("change", () => {
+      for (const cb of document.querySelectorAll(".history-select")) {
+        cb.checked = selectAll.checked;
+      }
+      updateBulkBar();
+    });
+  }
+  const delBtn = document.getElementById("history-bulk-delete");
+  if (delBtn) {
+    delBtn.addEventListener("click", async () => {
+      await deleteRuns(selectedRunIds());
+    });
+  }
+  const clearBtn = document.getElementById("history-bulk-clear");
+  if (clearBtn) {
+    clearBtn.addEventListener("click", () => {
+      for (const cb of document.querySelectorAll(".history-select")) cb.checked = false;
+      if (selectAll) selectAll.checked = false;
+      updateBulkBar();
+    });
+  }
+})();
+
+// ---------------------------------------------------------------------------
+// Model Leaderboard
+// ---------------------------------------------------------------------------
+// A single horizontal bar chart + mirrored table showing every model's
+// average BalatroBench Rating across all of its runs. Data comes from
+// /api/leaderboard which runs score_run() on every stored result, so old
+// runs pre-dating the rating are scored retroactively without a migration.
+//
+// Chart sits at the BOTTOM of the page (not up top) — it's summary data,
+// you want to see your fresh run land in the history table first, then
+// scroll down to see the impact on rankings.
+
+let _leaderboardChart = null;
+
+// Stable color palette for models. Same model gets same color across
+// renders and page reloads by hashing the model name. These are the
+// exact --balatro-* CSS custom properties the rest of the site uses
+// for chips/buttons/badges, so the leaderboard visually belongs with
+// the run cards and status pills rather than looking like it was
+// bolted on from a different design system.
+function _modelColor(name) {
+  const palette = [
+    "#FE5F55", // balatro-red
+    "#009dff", // balatro-blue
+    "#4BC292", // balatro-green
+    "#fda200", // balatro-orange
+    "#eac058", // balatro-gold
+    "#8867a5", // balatro-purple
+    // A few tonal variants so we can fit ~12 distinct models without
+    // collisions, still staying in the Balatro family (desaturated toward
+    // panel greys / earthy sidekicks):
+    "#b8456a", // deep rose
+    "#3a8fc2", // steel blue
+    "#76a25f", // mossy green
+    "#c17a3a", // cinnamon
+    "#6f8389", // muted slate
+    "#a094c8", // dusk lilac
+  ];
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return palette[h % palette.length];
+}
+
+async function loadLeaderboard() {
+  const tbody = document.querySelector("#leaderboard-table tbody");
+  const chartHost = document.getElementById("leaderboard-chart").parentElement;
+
+  // Clear any prior error overlay before fetching. We re-add below if needed.
+  const old_err = chartHost.querySelector("[data-role=leaderboard-error]");
+  if (old_err) old_err.remove();
+
+  let data;
+  try {
+    data = await api("/api/leaderboard");
+  } catch (e) {
+    // Surface fetch failures clearly in the UI instead of leaving a blank
+    // panel — otherwise "leaderboard empty" looks identical to "server out
+    // of date". Most commonly this hits when the webapp was running from
+    // before /api/leaderboard was added and hasn't been restarted yet.
+    console.warn("leaderboard load failed", e);
+    tbody.innerHTML = "";
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td colspan="8" style="text-align:center;color:#ff8e8e;padding:24px">
+      Could not load leaderboard: ${String(e.message || e)}.
+      <br><span style="color:#9aa3b6;font-size:12px">
+        If you just updated the code, restart the webapp so the new
+        /api/leaderboard route is registered.</span>
+    </td>`;
+    tbody.appendChild(tr);
+    if (_leaderboardChart) { _leaderboardChart.destroy(); _leaderboardChart = null; }
+    return;
+  }
+  const models = data.models || [];
+
+  // ---- table ----
+  tbody.innerHTML = "";
+  if (!models.length) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td colspan="8" style="text-align:center;color:#9aa3b6;padding:24px">
+      No runs yet. Finish a run to populate the leaderboard.
+    </td>`;
+    tbody.appendChild(tr);
+    if (_leaderboardChart) { _leaderboardChart.destroy(); _leaderboardChart = null; }
+    return;
+  }
+
+  models.forEach((m, i) => {
+    const tr = document.createElement("tr");
+    const avgTokens = m.total_tokens && m.total_runs
+      ? Math.round(m.total_tokens / m.total_runs)
+      : 0;
+    tr.innerHTML = `
+      <td style="font-weight:600">${i + 1}</td>
+      <td class="model-cell" title="${m.model}">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:2px;
+                     background:${_modelColor(m.model)};margin-right:6px;vertical-align:middle"></span>
+        ${m.model}
+      </td>
+      <td style="font-weight:700;font-size:16px">${m.rating.toFixed(1)}</td>
+      <td>${m.rating_best.toFixed(1)}</td>
+      <td>${m.total_runs}</td>
+      <td>${m.wins}/${m.total_runs} (${Math.round(m.win_rate * 100)}%)</td>
+      <td>${m.avg_ante}/8</td>
+      <td>${fmt(avgTokens)}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  // ---- range bar chart ----
+  // One horizontal bar per model, spanning [min_rating, max_rating] across
+  // all of that model's runs. A model with a single run renders as a
+  // zero-width line at its single rating; multi-run models show their
+  // spread so you can see consistency vs variance at a glance.
+  //
+  // Chart.js encodes "floating bar" ranges by passing [from, to] tuples
+  // in the dataset.data array. A point-marker dataset on top shows the
+  // average rating within the range so the viewer gets "best case",
+  // "worst case", and "typical" in one glance.
+  const labels = models.map(m => m.model);
+  const ranges = models.map(m => {
+    const rs = (m.ratings && m.ratings.length) ? m.ratings : [m.rating];
+    return [Math.min(...rs), Math.max(...rs)];
+  });
+  const colors = models.map(m => _modelColor(m.model));
+  const canvas = document.getElementById("leaderboard-chart");
+
+  // Vertical ranking chart in the spirit of the Artificial Analysis
+  // Intelligence Index: one bar per model, descending, bold numeric
+  // label ON each bar, min/max shown as whiskers for models with more
+  // than one run.
+  //
+  // Two custom Chart.js plugins handle the extras (Chart.js core only
+  // gives us a plain bar; we don't want the chartjs-plugin-datalabels or
+  // chartjs-plugin-error-bars dependencies for something this small):
+  //   - `valueLabels`: draws the numeric rating at the top of each bar
+  //   - `errorBars`:   draws I-beam whiskers spanning [min, max] on top
+  //                    of each bar for multi-run models
+  //
+  // Bars are sized to a fixed pixel width so the chart stretches
+  // horizontally (with scroll) rather than squishing when more models
+  // are added. Rankings are most legible when names don't overlap.
+  const BAR_PIXEL_WIDTH = 64;
+  const avgs = models.map(m => m.rating);
+  // All ink lives in the Balatro-themed CSS custom-property palette —
+  // pull the actual values at runtime so theming tweaks flow through
+  // without touching JS. Chart.js doesn't read CSS vars for canvas
+  // strokes, but we can resolve them against the root element once.
+  const rootStyle = getComputedStyle(document.documentElement);
+  const panelBlack = rootStyle.getPropertyValue("--panel-black").trim() || "#374244";
+  const panelGrey = rootStyle.getPropertyValue("--panel-grey").trim() || "#bfc7d5";
+  const textMuted = rootStyle.getPropertyValue("--text-muted").trim() || "#6f8389";
+  const textDark = rootStyle.getPropertyValue("--text-dark").trim() || "#374244";
+  const balatroFont = "m6x11plus, 'Courier New', monospace";
+
+  // Size canvas width based on model count so labels don't collide.
+  // Chart.js 4 with responsive:false reads canvas.width / canvas.height
+  // as the pixel buffer dims, NOT canvas.style.*, so we set both: the
+  // attributes for the draw buffer, CSS for layout size. The host's
+  // overflow-x:auto lets the chart scroll horizontally when it outgrows
+  // the viewport.
+  const host = document.getElementById("leaderboard-chart-host");
+  const hostWidth = Math.max(host.clientWidth, models.length * BAR_PIXEL_WIDTH + 140);
+  canvas.width = hostWidth;
+  canvas.height = 400;
+  canvas.style.width = hostWidth + "px";
+  canvas.style.height = "400px";
+  host.style.height = "420px"; // reset from any prior run
+
+  // Plugin: value labels on top of each bar. Styled like Balatro's score
+  // chips — dark text, cream pill background with a chunky outline.
+  // The matching panel treatment means the numbers read like little
+  // score tokens rather than raw floating digits.
+  const valueLabelsPlugin = {
+    id: "bbValueLabels",
+    afterDatasetsDraw(chart) {
+      const { ctx } = chart;
+      const meta = chart.getDatasetMeta(0);
+      ctx.save();
+      ctx.font = `bold 15px ${balatroFont}`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      const baseY = chart.scales.y.getPixelForValue(0);
+
+      meta.data.forEach((bar, i) => {
+        const v = avgs[i];
+        if (v === null || v === undefined) return;
+        const text = v.toFixed(1);
+        const textW = ctx.measureText(text).width;
+        const padX = 6, padY = 3;
+        const pillW = textW + padX * 2;
+        const pillH = 20;
+        // Anchor: above the bar for non-zero; just above the axis for zero
+        let cy = bar.y - pillH / 2 - 4;
+        if (v < 1) cy = baseY - pillH / 2 - 4;
+        const cx = bar.x;
+
+        // Pill body: cream fill, dark border, 2px "drop" like Balatro buttons.
+        const x0 = cx - pillW / 2, y0 = cy - pillH / 2;
+        const r = 6;
+        // Drop shadow (offset 0, 2)
+        ctx.fillStyle = "rgba(55,66,68,0.35)";
+        _roundRect(ctx, x0, y0 + 2, pillW, pillH, r); ctx.fill();
+        // Main pill
+        ctx.fillStyle = "#fffaf0";
+        ctx.strokeStyle = panelBlack;
+        ctx.lineWidth = 2;
+        _roundRect(ctx, x0, y0, pillW, pillH, r);
+        ctx.fill(); ctx.stroke();
+        // Text
+        ctx.fillStyle = textDark;
+        ctx.fillText(text, cx, cy + 0.5);
+      });
+      ctx.restore();
+    },
+  };
+
+  // Plugin: min/max whiskers ("I-beam" error bars) for multi-run models.
+  // Thinner and in panel-black to sit on top of the chunky-bar borders
+  // without dominating visually. Single-run models and 0-range runs are
+  // skipped — a whisker on a single point is misleading anyway.
+  const errorBarsPlugin = {
+    id: "bbErrorBars",
+    afterDatasetsDraw(chart) {
+      const { ctx } = chart;
+      const meta = chart.getDatasetMeta(0);
+      ctx.save();
+      ctx.strokeStyle = panelBlack;
+      ctx.lineWidth = 1.25;
+      ctx.lineCap = "round";
+      meta.data.forEach((bar, i) => {
+        const [min, max] = ranges[i];
+        if (max - min < 0.1) return;
+        const x = bar.x;
+        const yMin = chart.scales.y.getPixelForValue(min);
+        const yMax = chart.scales.y.getPixelForValue(max);
+        const cap = Math.min(7, bar.width / 2 - 2);
+        // Vertical whisker stem
+        ctx.beginPath();
+        ctx.moveTo(x, yMin); ctx.lineTo(x, yMax);
+        ctx.stroke();
+        // I-beam caps
+        ctx.beginPath();
+        ctx.moveTo(x - cap, yMax); ctx.lineTo(x + cap, yMax);
+        ctx.moveTo(x - cap, yMin); ctx.lineTo(x + cap, yMin);
+        ctx.stroke();
+      });
+      ctx.restore();
+    },
+  };
+
+  // Rounded-rect helper used by the value-label plugin. Matches the
+  // radius the panels/pills elsewhere in the UI use.
+  function _roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  const ctx = canvas.getContext("2d");
+  if (_leaderboardChart) _leaderboardChart.destroy();
+  _leaderboardChart = new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [{
+        label: "Avg Rating",
+        data: avgs,
+        backgroundColor: colors,
+        // Chunky dark borders match Balatro's cards/pills elsewhere on
+        // the site (panel-black outlines + drop shadows). Gives the
+        // bars that "sticker on cream" feel instead of floating rects.
+        borderColor: panelBlack,
+        borderWidth: 2,
+        borderRadius: 6,
+        borderSkipped: false,
+        barThickness: BAR_PIXEL_WIDTH - 20,
+        maxBarThickness: BAR_PIXEL_WIDTH - 20,
+      }],
+    },
+    plugins: [valueLabelsPlugin, errorBarsPlugin],
+    options: {
+      responsive: false,
+      maintainAspectRatio: false,
+      layout: { padding: { top: 28, right: 20, bottom: 8, left: 8 } },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: "#fffaf0",
+          borderColor: panelBlack,
+          borderWidth: 2,
+          titleColor: textDark,
+          bodyColor: textDark,
+          titleFont: { family: balatroFont, size: 14, weight: "normal" },
+          bodyFont: { family: balatroFont, size: 13 },
+          padding: 10,
+          caretSize: 6,
+          callbacks: {
+            label: (ctx) => {
+              const m = models[ctx.dataIndex];
+              if (!m) return "";
+              const rs = m.ratings || [m.rating];
+              const lo = Math.min(...rs).toFixed(1);
+              const hi = Math.max(...rs).toFixed(1);
+              const runLabel = m.total_runs === 1 ? "1 run" : `${m.total_runs} runs`;
+              return [
+                `Avg: ${m.rating.toFixed(1)} / 100`,
+                `Range: ${lo} - ${hi}  (${runLabel})`,
+                `Wins: ${m.wins}/${m.total_runs}`,
+                `Avg ante: ${m.avg_ante}/8`,
+              ];
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          grid: { display: false },
+          border: { color: panelBlack, width: 2 },
+          ticks: {
+            color: textDark,
+            font: { size: 12, family: balatroFont },
+            maxRotation: 55,
+            minRotation: 45,
+            autoSkip: false,
+            callback: function(value) {
+              const l = this.getLabelForValue(value) || "";
+              // Strip provider prefix ("anthropic/", "google/") and
+              // ":free" suffix so the axis reads like model-family names
+              // without losing info (full name is in the tooltip).
+              const short = l.split("/").slice(-1)[0].replace(":free", "");
+              return short.length > 22 ? short.slice(0, 20) + "…" : short;
+            },
+          },
+        },
+        y: {
+          beginAtZero: true,
+          max: 100,
+          grid: { color: "rgba(55, 66, 68, 0.14)", lineWidth: 1 },
+          border: { color: panelBlack, width: 2 },
+          ticks: {
+            color: textMuted,
+            font: { size: 12, family: balatroFont },
+            stepSize: 20,
+          },
+          title: {
+            display: true,
+            text: "BalatroBench Rating",
+            color: textMuted,
+            font: { size: 13, family: balatroFont },
+          },
+        },
+      },
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -905,10 +1685,14 @@ $("#start-btn").addEventListener("click", async () => {
   try {
     const body = {
       model: $("#model").value.trim(),
+      provider: currentProvider(),
       deck: $("#deck").value,
       stake: parseInt($("#stake").value, 10),
       runs: parseInt($("#runs").value, 10),
       auto_restart_balatro: $("#auto-restart").checked,
+      // The api_key override is what's currently in the input for the
+      // CURRENT provider. If blank, backend falls back to the saved
+      // provider-specific key, then to the env var.
       api_key: $("#api-key").value || undefined,
     };
     await api("/api/start", {
@@ -948,9 +1732,34 @@ $("#auto-restart").addEventListener("change", async () => {
   });
 });
 
+// Provider dropdown: swap the model catalog AND the API-key field to
+// the newly-selected provider. Also persist the choice immediately so
+// a browser refresh remembers it.
+$("#provider").addEventListener("change", async () => {
+  const p = currentProvider();
+  await api("/api/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: p }),
+  });
+  refreshApiKeyField();
+  await loadModels(p);
+});
+
+// Auto-save the API key when the input loses focus. `change` wouldn't
+// fire for programmatic value updates (setting it from loadSettings);
+// `blur` reliably captures "user typed something then clicked away".
+$("#api-key").addEventListener("blur", saveCurrentApiKey);
+
 // Init
 (async () => {
-  await Promise.all([loadModels(), loadSettings(), loadHistory()]);
+  // Order matters: settings first so we know which provider is selected,
+  // THEN load that provider's model catalog. Calling them in parallel
+  // would race — loadModels would fetch openrouter's catalog regardless
+  // of the saved provider.
+  await loadSettings();
+  await loadHistory();
+  await loadModels(currentProvider());
   setInterval(pollStatus, 1500);
   pollStatus();
 })();

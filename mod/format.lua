@@ -192,10 +192,20 @@ function Format.blind_select(state)
     table.insert(lines, fmt_hand_levels(state.hand_levels))
     table.insert(lines, "")
 
-    -- Actions
+    -- Actions. IMPORTANT: Balatro does NOT let you skip the Boss Blind.
+    -- The UI has no skip button on Boss, and the mod's skip fallback no-ops
+    -- when Boss is on deck (see actions.lua). If we advertised `skip` here
+    -- while Boss is on deck, a weak model that picks `skip` would get an
+    -- unchanged state back and loop on `skip` forever (observed with
+    -- liquid/lfm-2.5-1.2b). So only offer `skip` when Small or Big is on
+    -- deck.
     table.insert(lines, "--- ACTIONS ---")
     table.insert(lines, "select    | Play the current blind")
-    table.insert(lines, "skip      | Skip this blind and collect the skip reward tag")
+    if on_deck ~= "Boss" then
+        table.insert(lines, "skip      | Skip this blind and collect the skip reward tag")
+    else
+        table.insert(lines, "(Boss Blind cannot be skipped — only `select` is available)")
+    end
 
     return table.concat(lines, "\n")
 end
@@ -430,6 +440,16 @@ function Format.pack_open(state)
     local choose = pack.choose or 1
     local total = pack.cards and #pack.cards or 0
 
+    -- Whether the pack contents could include a consumable that targets
+    -- hand cards (tarots in Arcana packs, spectrals in Spectral packs,
+    -- or the equivalent in unified SMODS_BOOSTER_OPENED state). If yes
+    -- we'll show the hand below so the model can pick targets.
+    local pack_may_need_targets = (
+        state.phase == "TAROT_PACK"
+        or state.phase == "SPECTRAL_PACK"
+        or state.phase == "SMODS_BOOSTER_OPENED"
+    )
+
     table.insert(lines, "=== BALATRO BENCH ===")
     table.insert(lines, string.format("Phase: Pack Opening (%s - Choose %d of %d)",
         pack_type, choose, total))
@@ -450,6 +470,21 @@ function Format.pack_open(state)
     end
     table.insert(lines, "")
 
+    -- Your hand. CRITICAL for Arcana / Spectral packs: many tarots and
+    -- spectrals target hand cards (Deja Vu adds a Red Seal, The Lovers
+    -- makes a card Wild, Death converts one card to another, etc.). If
+    -- the model doesn't see the hand, it has no way to specify
+    -- `cards: [...]` targets when picking one of those, and the game
+    -- crashes with `conv_card nil` at card.lua:1411. Always show the
+    -- hand during tarot/spectral/mixed pack phases.
+    if pack_may_need_targets and state.hand and #state.hand > 0 then
+        table.insert(lines, string.format("--- YOUR HAND (%d cards — potential targets) ---", #state.hand))
+        for _, card in ipairs(state.hand) do
+            table.insert(lines, fmt_card(card, card.index))
+        end
+        table.insert(lines, "")
+    end
+
     -- Current consumables/jokers for context
     table.insert(lines, string.format("--- YOUR CONSUMABLES [%d/%d slots] ---",
         #state.consumables, state.consumable_slots))
@@ -465,10 +500,26 @@ function Format.pack_open(state)
     end
     table.insert(lines, "")
 
-    -- Actions
+    -- Actions. For targeted tarots/spectrals (Deja Vu, The Lovers, Death,
+    -- Cryptid, etc.) the `select` MUST include a `cards` array of hand
+    -- indices, otherwise Balatro's consumable logic dereferences a nil
+    -- target card and crashes. We document both call shapes here so the
+    -- model can construct the right JSON based on what it chose.
     table.insert(lines, "--- ACTIONS ---")
-    table.insert(lines, "select <index>  | Choose a card from the pack")
-    table.insert(lines, "skip            | Skip, don't take any card")
+    table.insert(lines, "select          | Pick a card from the pack.")
+    table.insert(lines, '                | Plain form:    {"action":"select","index":<N>}')
+    if pack_may_need_targets then
+        table.insert(lines, '                | Targeted form: {"action":"select","index":<N>,"cards":[<hand_idx>,...]}')
+        table.insert(lines, "                |   Use the targeted form if the pack card is a tarot/spectral that")
+        table.insert(lines, "                |   acts on hand cards (Deja Vu/Trance/Medium → 1 card,")
+        table.insert(lines, "                |   The Lovers/Tower/Chariot/Devil/Justice → 1 card,")
+        table.insert(lines, "                |   Cryptid → 1 card, Death → 2 cards,")
+        table.insert(lines, "                |   The Magician/Empress/Hierophant/Hanged Man → up to 2 cards,")
+        table.insert(lines, "                |   The Star/Moon/Sun/World → up to 3 cards).")
+        table.insert(lines, "                |   If you pick a NON-targeting card (Wraith, Ankh, Hex, Soul,")
+        table.insert(lines, "                |   Black Hole, Sigil, Ouija, Judgement, etc.) omit `cards`.")
+    end
+    table.insert(lines, "skip            | Skip the pack, take nothing.")
 
     return table.concat(lines, "\n")
 end

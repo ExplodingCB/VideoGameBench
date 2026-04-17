@@ -733,41 +733,344 @@ def _normalize_action(data: dict) -> dict:
 def build_messages(system: str, game_state: str, history: list[dict] | None = None) -> list[dict]:
     """Build the message list for the model API call.
 
+    History entries are the FULL prior turns — we preserve each turn's raw
+    state text (as user) and the model's raw response (as assistant,
+    including any reasoning content), following Claude Code's pattern of
+    never pre-emptively summarizing. Compaction is handled separately
+    (see `compact_history` + the runner's compaction trigger).
+
+    A compacted entry is denoted by `{"type": "compaction", "summary": ...}`
+    and emitted as a single synthetic user message at its position in the
+    history so the model sees "prior turns have been condensed as follows".
+
     Args:
-        system: System prompt
-        game_state: Current formatted game state text
-        history: Previous (state_summary, action) pairs for context
+        system:     System prompt.
+        game_state: Current formatted game state text (may include an
+                    observation banner prepended by the runner).
+        history:    Ordered list of turn entries. Each entry is one of:
+                      {"type": "turn", "state": <text>, "response": <text>}
+                      {"type": "compaction", "summary": <text>}
+                    Legacy tuples with `state` + `action` are still
+                    accepted for backwards compat.
 
     Returns:
-        List of message dicts for the chat API
+        A flat list of {"role","content"} dicts ready for an OpenAI-style
+        chat-completions endpoint.
     """
-    messages = [{"role": "system", "content": system}]
+    messages: list[dict] = [{"role": "system", "content": system}]
 
-    # Add history (summarized previous states)
     if history:
         for entry in history:
-            # User message = game state (summarized for older entries)
-            messages.append({"role": "user", "content": entry["state"]})
-            # Assistant message = the action taken
-            messages.append({"role": "assistant", "content": json.dumps(entry["action"])})
+            etype = entry.get("type")
+            if etype == "compaction":
+                # Surface compaction explicitly so the model understands the
+                # temporal gap and can trust the summary as ground truth for
+                # earlier turns.
+                banner = (
+                    "=== COMPACTED RUN HISTORY ===\n"
+                    "The earlier turns of this run have been summarized to fit "
+                    "the context window. Treat the following as authoritative "
+                    "context for everything that happened before the raw turns "
+                    "shown later.\n\n"
+                    + (entry.get("summary") or "")
+                )
+                messages.append({"role": "user", "content": banner})
+                # A minimal assistant ack keeps the user/assistant pairing
+                # predictable for chat templates that expect it.
+                messages.append({"role": "assistant", "content": "Understood. Continuing from the compacted context."})
+            elif etype == "turn":
+                messages.append({"role": "user", "content": entry["state"]})
+                messages.append({"role": "assistant", "content": entry["response"]})
+            else:
+                # Legacy fallback: old-style {"state": summary, "action": {...}}
+                if "state" in entry:
+                    messages.append({"role": "user", "content": entry["state"]})
+                if "action" in entry:
+                    messages.append({"role": "assistant", "content": json.dumps(entry["action"])})
 
-    # Add current game state
     messages.append({"role": "user", "content": game_state})
-
     return messages
 
 
 def summarize_state(game_state: str, action: dict) -> str:
-    """Create a short summary of a game state for history.
-
-    Keeps the first few lines (phase info) and the action taken.
+    """Legacy summary — kept for backwards compatibility with any external
+    consumers. The main runner no longer uses this; full transcripts are
+    preserved until the compactor fires.
     """
     lines = game_state.split("\n")
-    # Keep header lines (first 5-6 lines typically contain phase/score/money)
     summary_lines = []
     for line in lines[:8]:
         if line.strip():
             summary_lines.append(line)
-
     summary = "\n".join(summary_lines)
     return f"{summary}\n[You chose: {json.dumps(action)}]"
+
+
+# ---------------------------------------------------------------------------
+# Action observation banners
+# ---------------------------------------------------------------------------
+# After each action, we compute a short "PREVIOUS ACTION RESULT" note and
+# prepend it to the next state_text the model sees. This is the harness's
+# "observation" channel — without it the model has to infer outcomes from
+# bare score deltas (it often doesn't). See e.g. DeepSeek's broken-flush
+# misplay where it "played a flush" but actually included one off-suit card:
+# this banner surfaces the actual played cards + score delta so mistakes
+# become visible instead of silently compounding across turns.
+
+_CARD_RE = re.compile(
+    r"^\s*\[(\d+)\]\s+(?P<rank>[A-Za-z0-9]+)\s+of\s+(?P<suit>Hearts|Diamonds|Clubs|Spades)"
+    r"(?:\s*\|\s*Chips:\s*(?P<chips>\d+))?"
+)
+
+
+def _parse_hand(state_text: str) -> dict[int, dict]:
+    """Extract the {index → card} map from a SELECTING_HAND state block."""
+    if not state_text:
+        return {}
+    start = state_text.find("--- YOUR HAND")
+    if start == -1:
+        return {}
+    end = state_text.find("\n---", start + 5)
+    block = state_text[start:end if end > 0 else len(state_text)]
+    out: dict[int, dict] = {}
+    for line in block.split("\n"):
+        m = _CARD_RE.match(line)
+        if not m:
+            continue
+        idx = int(m.group(1))
+        out[idx] = {
+            "rank": m.group("rank"),
+            "suit": m.group("suit"),
+            "chips": int(m.group("chips") or 0),
+        }
+    return out
+
+
+def _parse_score(state_text: str) -> int | None:
+    if not state_text:
+        return None
+    m = re.search(r"Current Score:\s*(-?[\d,]+)", state_text)
+    if not m:
+        return None
+    try:
+        return int(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _parse_money(state_text: str) -> int | None:
+    if not state_text:
+        return None
+    m = re.search(r"Money:\s*\$(-?\d+)", state_text)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+_RANK_ORDER = {
+    "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10,
+    "Jack": 11, "Queen": 12, "King": 13, "Ace": 14,
+}
+
+
+def _classify_poker_hand(cards: list[dict]) -> str:
+    """Return a short label like 'Flush', 'Two Pair', 'High Card'.
+
+    Deliberately simple — no wildcards, no stone/steel cards, no straights
+    with Ace-low wrap. Models mostly care about the crude class (did I
+    actually have a Flush?), not edge cases. If something breaks our
+    classifier the banner just says 'High Card' or similar; Balatro's own
+    engine remains the source of truth for actual scoring.
+    """
+    if not cards:
+        return "empty"
+    n = len(cards)
+    ranks = [_RANK_ORDER.get(c["rank"], 0) for c in cards]
+    suits = [c["suit"] for c in cards]
+    rank_counts: dict[int, int] = {}
+    for r in ranks:
+        rank_counts[r] = rank_counts.get(r, 0) + 1
+    count_values = sorted(rank_counts.values(), reverse=True)
+    all_same_suit = len(set(suits)) == 1 and n >= 5
+    sorted_unique_ranks = sorted(set(ranks))
+    is_straight = (
+        n >= 5
+        and len(sorted_unique_ranks) == n
+        and sorted_unique_ranks[-1] - sorted_unique_ranks[0] == n - 1
+    )
+    # Ace-low straight (A,2,3,4,5) — Ace counts as 1 here
+    if n == 5 and set(ranks) == {14, 2, 3, 4, 5}:
+        is_straight = True
+
+    if all_same_suit and is_straight:
+        return "Straight Flush"
+    if count_values and count_values[0] == 5:
+        return "Five of a Kind"
+    if count_values[:2] == [4, 1] or count_values == [4]:
+        return "Four of a Kind"
+    if count_values[:2] == [3, 2]:
+        return "Full House"
+    if all_same_suit:
+        return "Flush"
+    if is_straight:
+        return "Straight"
+    if count_values and count_values[0] == 3:
+        return "Three of a Kind"
+    if count_values[:2] == [2, 2]:
+        return "Two Pair"
+    if count_values and count_values[0] == 2:
+        return "Pair"
+    return "High Card"
+
+
+def _observe_play(prev_state: str, action: dict, next_state: str | None) -> str:
+    hand = _parse_hand(prev_state)
+    chosen = action.get("cards") or []
+    chosen_cards = [hand[i] for i in chosen if i in hand]
+    score_before = _parse_score(prev_state)
+    score_after = _parse_score(next_state or "")
+
+    parts: list[str] = []
+    parts.append(f"You played cards {list(chosen)}")
+    if chosen_cards:
+        names = ", ".join(f"{c['rank']} of {c['suit']}" for c in chosen_cards)
+        parts.append(f"({names})")
+        klass = _classify_poker_hand(chosen_cards)
+        parts.append(f"-> Balatro classified this as: {klass}")
+        # Distinct-suit diagnostic: catches the "I played a flush but…" bug
+        distinct_suits = {c["suit"] for c in chosen_cards}
+        if len(distinct_suits) > 1 and klass != "Straight Flush":
+            parts.append(
+                f"(cards spanned {len(distinct_suits)} suits: "
+                f"{', '.join(sorted(distinct_suits))} - a Flush requires all 5 cards same suit)"
+            )
+    if score_before is not None and score_after is not None:
+        delta = score_after - score_before
+        parts.append(f"Score: {score_before:,} -> {score_after:,} (+{delta:,} chips)")
+    return "PREVIOUS ACTION RESULT: " + ". ".join(parts) + "."
+
+
+def _observe_discard(prev_state: str, action: dict) -> str:
+    hand = _parse_hand(prev_state)
+    chosen = action.get("cards") or []
+    chosen_cards = [hand[i] for i in chosen if i in hand]
+    names = ", ".join(f"{c['rank']} of {c['suit']}" for c in chosen_cards) if chosen_cards else "?"
+    return (
+        f"PREVIOUS ACTION RESULT: You discarded {len(chosen)} card(s): {names}. "
+        f"Replacements have been drawn. One discard has been spent."
+    )
+
+
+def _observe_money_change(prev_state: str, next_state: str | None, verb: str) -> str:
+    m_before = _parse_money(prev_state)
+    m_after = _parse_money(next_state or "")
+    if m_before is None or m_after is None:
+        return f"PREVIOUS ACTION RESULT: {verb}."
+    delta = m_after - m_before
+    sign = "+" if delta >= 0 else ""
+    return f"PREVIOUS ACTION RESULT: {verb}. Money: ${m_before} -> ${m_after} ({sign}{delta})."
+
+
+def build_observation(prev_state: str, action: dict, next_state: str | None) -> str | None:
+    """Produce the 'PREVIOUS ACTION RESULT' banner for the previous turn.
+
+    Returns None when the action has no meaningful observation worth
+    surfacing (e.g. sort, rearrange_jokers — cosmetic in-place reorders
+    whose effect is already visible in the next state).
+    """
+    if not action:
+        return None
+    act = action.get("action")
+    if act == "play":
+        return _observe_play(prev_state, action, next_state)
+    if act == "discard":
+        return _observe_discard(prev_state, action)
+    if act == "select":
+        return "PREVIOUS ACTION RESULT: Blind selected. Round has started; draw new hand."
+    if act == "skip":
+        return "PREVIOUS ACTION RESULT: Blind skipped. Skip-reward tag collected for use on a later blind."
+    if act == "buy":
+        idx = action.get("index")
+        return _observe_money_change(prev_state, next_state, f"Bought shop item at index {idx}")
+    if act == "sell":
+        slot = action.get("slot") or action.get("index")
+        return _observe_money_change(prev_state, next_state, f"Sold item at slot {slot}")
+    if act == "reroll":
+        return _observe_money_change(prev_state, next_state, "Rerolled the shop")
+    if act == "use":
+        slot = action.get("slot") or action.get("index")
+        return f"PREVIOUS ACTION RESULT: Used consumable at slot {slot}."
+    if act == "next_round":
+        return "PREVIOUS ACTION RESULT: Left shop, proceeding to next blind."
+    if act == "cash_out":
+        return "PREVIOUS ACTION RESULT: Cashed out round rewards."
+    if act in ("sort", "rearrange_jokers"):
+        return None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Compaction
+# ---------------------------------------------------------------------------
+COMPACTION_SYSTEM_PROMPT = """You are a summarization assistant for an AI playing a long run of the game Balatro. You will be given the full verbatim transcript so far (states the model saw, reasoning it produced, actions it took). Produce a COMPRESSED "RUN SO FAR" briefing that a fresh model turn can read in place of the full transcript.
+
+Your output must be information-dense and concrete. Include:
+1. Current ante / round / score position.
+2. Every joker currently owned, with role/rationale.
+3. Every consumable currently owned.
+4. Key purchases and sales made so far, with reasoning ("bought Blueprint to copy X", "rerolled 3x in ante 2 looking for Y").
+5. The current strategy / game plan the model has been executing.
+6. Any mistakes observed (e.g. broken flushes, poor discards) and whether they were corrected.
+7. Money trajectory across antes.
+8. Skip tags collected and which blinds they apply to.
+
+Do NOT include turn-by-turn replays. Do NOT include the system prompt. Do NOT include card-by-card hand listings from past turns. Produce ONLY the briefing, in clean markdown, no preamble, no "Here is the summary:" lines."""
+
+
+def build_compaction_messages(
+    system_prompt: str,
+    history: list[dict],
+    current_state: str,
+) -> list[dict]:
+    """Build the messages for a compaction LLM call.
+
+    The compaction call is a separate conversation with its own tiny
+    system prompt; we feed it the raw transcript (flattened into plain
+    text) plus the current state. We do NOT pass the gameplay system
+    prompt — that would bias the summarizer toward playing rather than
+    summarizing.
+    """
+    transcript_parts: list[str] = []
+    turn_idx = 0
+    for entry in history:
+        etype = entry.get("type")
+        if etype == "compaction":
+            transcript_parts.append(
+                "--- [earlier turns previously compacted] ---\n"
+                + (entry.get("summary") or "")
+            )
+        elif etype == "turn":
+            turn_idx += 1
+            transcript_parts.append(f"--- Turn {turn_idx} STATE ---\n{entry['state']}")
+            transcript_parts.append(f"--- Turn {turn_idx} MODEL RESPONSE ---\n{entry['response']}")
+    transcript = "\n\n".join(transcript_parts) if transcript_parts else "(no prior turns)"
+
+    user = (
+        "Here is the transcript of the Balatro run so far.\n\n"
+        f"{transcript}\n\n"
+        "The CURRENT game state (which the playing model is about to act on) is:\n\n"
+        f"{current_state}\n\n"
+        "Produce the RUN SO FAR briefing now."
+    )
+    # We DO include the gameplay system prompt too, lightly, so the
+    # summarizer understands the game's vocabulary (joker names, ante
+    # structure, etc). But the primary instruction is the compaction one.
+    # Putting compaction first makes its instruction win on instruction-
+    # tuned models when the two prompts give contradictory guidance.
+    return [
+        {"role": "system", "content": COMPACTION_SYSTEM_PROMPT + "\n\nGame context reference:\n" + system_prompt[:3000]},
+        {"role": "user", "content": user},
+    ]
