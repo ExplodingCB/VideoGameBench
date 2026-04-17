@@ -5,6 +5,7 @@ local Server = require("balatrobench_server")
 local State = require("balatrobench_state")
 local Format = require("balatrobench_format")
 local Actions = require("balatrobench_actions")
+local Overlay = require("balatrobench_overlay")
 
 local BalatroBench = {}
 
@@ -43,6 +44,8 @@ function BalatroBench.init()
     end
 
     active = true
+
+    Overlay.init()
 
     print("[BalatroBench] Ready. Waiting for AI client on port " ..
           tostring(tonumber(os.getenv("BALATROBENCH_PORT")) or 12345))
@@ -97,6 +100,7 @@ end
 ---------------------------------------------------------------------------
 
 function BalatroBench.update(dt)
+    Overlay.update(dt)
     if not active or not server then return end
 
     local connected = server:is_connected()
@@ -207,6 +211,9 @@ end
 
 function BalatroBench.handle_message(msg)
     if not msg then return end
+
+    -- Overlay messages (jimbo_*) are fire-and-forget; consume before other routing
+    if msg.type and Overlay.on_message(msg) then return end
 
     -- Method calls (gamestate, health, start, stats)
     if msg.method then

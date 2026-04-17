@@ -31,6 +31,12 @@ name = "balatrobench_format"
 
 [[patches]]
 [patches.module]
+source = "overlay.lua"
+before = "main.lua"
+name = "balatrobench_overlay"
+
+[[patches]]
+[patches.module]
 source = "BalatroBench.lua"
 before = "main.lua"
 name = "balatrobench_main"
@@ -77,3 +83,7 @@ payload = '''
         _G.BalatroBench_mod.shutdown()
     end
 '''
+
+# Note: the overlay draw hook is installed at runtime by overlay.lua
+# (monkey-patches love.draw on first update tick) so it renders on top
+# of the game, not underneath it.

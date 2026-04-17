@@ -6,132 +6,343 @@
 <title>BalatroBench Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
+  @font-face {
+    font-family: "m6x11plus";
+    src: url("/static/balatro/fonts/m6x11plus.ttf") format("truetype");
+    font-display: block;
+  }
+  /* Balatro palette pulled from globals.lua (G.C.*) */
   :root {
-    --bg: #0f1115;
-    --panel: #171a21;
-    --panel-2: #1f2330;
-    --border: #2a2f3d;
-    --text: #e6e9ef;
-    --muted: #8a93a6;
-    --accent: #ff9f43;
-    --accent-2: #4ba6ff;
-    --good: #3ecf8e;
-    --bad: #ff6b6b;
-    --warn: #ffd166;
+    --bg: #142027;            /* fallback solid bg */
+    --panel-grey: #bfc7d5;    /* JOKER_GREY — bubble/panel outer border */
+    --panel-white: #f0e6c2;   /* cream card stock */
+    --panel-black: #374244;   /* MAIN / DARK — chunky outlines */
+    --text-dark: #374244;
+    --text-muted: #6f8389;
+    --text-light: #f0e6c2;
+    --balatro-red: #FE5F55;
+    --balatro-blue: #009dff;
+    --balatro-green: #4BC292;
+    --balatro-orange: #fda200;
+    --balatro-gold: #eac058;
+    --balatro-purple: #8867a5;
+    --bg-light: #B8D8D8;
+    --bg-dark: #7A9E9F;
+    --outline-dark: #7A9E9F;
+    --shadow: 0 4px 0 rgba(55,66,68,0.55);
+    --shadow-hover: 0 6px 0 rgba(55,66,68,0.55);
+    --shadow-press: 0 1px 0 rgba(55,66,68,0.55);
   }
+
   * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  header { padding: 18px 24px; border-bottom: 1px solid var(--border); display: flex;
-    align-items: center; justify-content: space-between; background: var(--panel); }
-  header h1 { margin: 0; font-size: 20px; font-weight: 600; }
-  header h1 span { color: var(--accent); }
-  header .tag { color: var(--muted); font-size: 12px; margin-left: 12px; }
-
-  .wrap { max-width: 1280px; margin: 0 auto; padding: 24px; }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-    padding: 18px; margin-bottom: 18px; }
-  .panel h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; text-transform: uppercase;
-    letter-spacing: 0.5px; color: var(--muted); }
-  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
-  .col { display: flex; flex-direction: column; gap: 4px; }
-  .col label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
-  input, select, button {
-    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 9px 11px; font-size: 14px; font-family: inherit;
+  html, body { margin: 0; padding: 0; color: var(--text-dark);
+    font-family: "m6x11plus", "Courier New", monospace;
+    font-size: 18px; letter-spacing: 0.3px;
+    background: var(--bg);
+    /* Custom Balatro-ish crosshair cursor */
+    cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20"><path d="M4 10 H16 M10 4 V16" stroke="%23f0e6c2" stroke-width="2.5" stroke-linecap="round"/><path d="M4 10 H16 M10 4 V16" stroke="%23374244" stroke-width="1" stroke-linecap="round"/></svg>') 10 10, crosshair;
   }
-  input:focus, select:focus { outline: none; border-color: var(--accent-2); }
-  input[type=number] { width: 90px; }
-  input.wide { width: 360px; }
-  button { cursor: pointer; font-weight: 600; }
-  button.primary { background: var(--accent); color: #000; border-color: var(--accent); }
-  button.primary:hover { filter: brightness(1.1); }
-  button.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
-  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button, select, a { cursor: inherit; }
 
-  .badge { display: inline-block; padding: 3px 8px; border-radius: 10px; font-size: 11px;
-    font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; }
-  .badge.running { background: var(--accent-2); color: #000; }
-  .badge.restarting_game { background: var(--warn); color: #000; }
-  .badge.finished { background: var(--good); color: #000; }
-  .badge.failed, .badge.stopped { background: var(--bad); color: #fff; }
-  .badge.queued { background: var(--warn); color: #000; }
-  .badge.idle { background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
+  /* WebGL swirl canvas sits behind everything */
+  #balatro-bg {
+    position: fixed; inset: 0; z-index: -1;
+    width: 100vw; height: 100vh;
+    display: block;
+  }
 
-  #status-line { font-size: 13px; color: var(--muted); margin-top: 10px; }
-  #status-line b { color: var(--text); }
+  /* Subtle CRT-style scanline overlay for that in-game feel */
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background:
+      repeating-linear-gradient(0deg, rgba(0,0,0,0.04) 0 2px, transparent 2px 4px);
+    mix-blend-mode: multiply;
+  }
+  .wrap, header { position: relative; z-index: 1; }
 
-  .runs-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  @media (max-width: 900px) { .runs-grid { grid-template-columns: 1fr; } }
-  .run-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-    padding: 16px; }
-  .run-card h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; display: flex;
-    justify-content: space-between; align-items: center; }
-  .run-card .meta { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
-  .run-card .chart-wrap { position: relative; height: 180px; }
-  .run-card .tally { display: flex; gap: 12px; margin-top: 10px; font-size: 12px;
-    color: var(--muted); flex-wrap: wrap; }
-  .run-card .tally b { color: var(--text); }
+  header {
+    padding: 22px 30px; display: flex;
+    align-items: center; justify-content: space-between;
+    background: transparent;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 34px; font-weight: normal;
+    color: var(--text-light);
+    text-shadow: 3px 3px 0 var(--panel-black), 0 0 20px rgba(0,0,0,0.6);
+    letter-spacing: 1px;
+  }
+  header h1 span { color: var(--balatro-red); }
+  header h1 .tag {
+    font-size: 15px; color: var(--panel-grey);
+    margin-left: 14px; text-shadow: 2px 2px 0 var(--panel-black);
+  }
 
-  .thinking-wrap { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
-  .thinking-header { display: flex; align-items: center; justify-content: space-between;
-    font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted);
-    cursor: pointer; user-select: none; }
-  .thinking-header .toggle { color: var(--accent-2); font-weight: 600; }
-  .thinking-live { display: inline-flex; align-items: center; gap: 6px; color: var(--warn); }
-  .thinking-live .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn);
-    animation: pulse 1.2s infinite; }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 18px 30px 60px; }
+
+  /* Panels = grey outer + cream inner, the exact recipe from
+     G.UIDEF.speech_bubble. Drop shadow gives the "card stock" lift. */
+  .panel {
+    background: var(--panel-grey);
+    border: 3px solid var(--panel-black);
+    border-radius: 14px;
+    padding: 7px;
+    margin-bottom: 22px;
+    box-shadow: var(--shadow);
+  }
+  .panel > :not(.panel-head)::before { content: none; }
+  .panel > .panel-body,
+  .panel > h2 + *, /* first real content after the heading */
+  .panel .panel-inner {
+    background: var(--panel-white);
+    border-radius: 9px;
+    padding: 16px 18px;
+  }
+  .panel h2 {
+    margin: 0 0 7px;
+    font-size: 20px; font-weight: normal;
+    color: var(--panel-black);
+    padding: 8px 16px;
+    background: var(--panel-white);
+    border-radius: 9px 9px 0 0;
+    border-bottom: 3px solid var(--panel-grey);
+    letter-spacing: 1px;
+  }
+  .panel h2 + * { border-radius: 0 0 9px 9px; margin-top: 0; }
+
+  .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-end; }
+  .col { display: flex; flex-direction: column; gap: 6px; }
+  .col label { font-size: 14px; color: var(--text-muted); letter-spacing: 0.5px; }
+
+  /* Inputs = cream with a chunky dark border, like Balatro's text entry */
+  input, select {
+    background: #fffaf0; color: var(--text-dark);
+    border: 3px solid var(--panel-black); border-radius: 9px;
+    padding: 9px 12px; font-size: 17px;
+    font-family: inherit; letter-spacing: 0.3px;
+    box-shadow: 0 2px 0 var(--panel-black);
+  }
+  input:focus, select:focus {
+    outline: none; border-color: var(--balatro-blue);
+    box-shadow: 0 0 0 2px var(--balatro-blue), 0 2px 0 var(--panel-black);
+  }
+  input[type=number] { width: 110px; }
+  input.wide { width: 380px; }
+
+  /* Chunky Balatro buttons — big, bold, drop shadow, lift on hover, press on click */
+  button {
+    font-family: inherit; font-size: 19px; letter-spacing: 1px;
+    padding: 11px 22px; border-radius: 10px;
+    border: 3px solid var(--panel-black);
+    background: var(--panel-grey); color: var(--panel-black);
+    box-shadow: var(--shadow);
+    transition: transform 0.08s ease, box-shadow 0.08s ease, filter 0.12s ease;
+    text-transform: uppercase; font-weight: normal;
+  }
+  button:hover:not(:disabled) {
+    transform: translateY(-2px); box-shadow: var(--shadow-hover);
+    filter: brightness(1.08);
+  }
+  button:active:not(:disabled) {
+    transform: translateY(3px); box-shadow: var(--shadow-press);
+  }
+  button.primary { background: var(--balatro-red); color: #fffaf0; }
+  button.danger  { background: var(--balatro-blue); color: #fffaf0; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  /* Status badges — recolored to the Balatro palette */
+  .badge {
+    display: inline-block; padding: 4px 12px; border-radius: 8px;
+    font-size: 14px; letter-spacing: 0.8px;
+    border: 2px solid var(--panel-black);
+    box-shadow: 0 2px 0 var(--panel-black);
+  }
+  .badge.running { background: var(--balatro-blue); color: #fffaf0; }
+  .badge.restarting_game { background: var(--balatro-orange); color: var(--panel-black); }
+  .badge.finished { background: var(--balatro-green); color: var(--panel-black); }
+  .badge.failed, .badge.stopped { background: var(--balatro-red); color: #fffaf0; }
+  .badge.queued { background: var(--balatro-gold); color: var(--panel-black); }
+  .badge.idle { background: var(--panel-grey); color: var(--text-dark); }
+
+  #status-line { font-size: 15px; color: var(--text-muted); margin-top: 14px; }
+  #status-line b { color: var(--panel-black); }
+
+  /* Active Batch: one full-width run card per row. The inner layout is a
+     2-column grid — left = chart + stats (like Balatro's left sidebar),
+     right = model thinking log, tall and scrollable. */
+  .runs-grid { display: grid; grid-template-columns: 1fr; gap: 22px; }
+  .run-card {
+    background: var(--panel-grey);
+    border: 3px solid var(--panel-black);
+    border-radius: 14px;
+    padding: 7px;
+    box-shadow: var(--shadow);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    /* Inner 2-col grid: left gets chart/tally; right gets the thinking log */
+    display: grid;
+    grid-template-columns: minmax(440px, 1.2fr) minmax(380px, 1fr);
+    grid-template-rows: auto auto minmax(260px, 1fr) auto;
+    gap: 0;
+  }
+  /* No hover animation — the card stays put. */
+
+  /* Place children on the grid. All children share the cream background
+     so they read as one unified card-stock panel, with thick grey seams
+     between sections from the outer padding. */
+  .run-card > h3,
+  .run-card > .meta,
+  .run-card > .chart-wrap,
+  .run-card > .tally,
+  .run-card > .thinking-wrap {
+    background: var(--panel-white);
+    padding-left: 16px; padding-right: 16px;
+  }
+  .run-card > h3             { grid-column: 1 / -1; grid-row: 1;
+                                padding-top: 14px; padding-bottom: 6px;
+                                border-radius: 9px 9px 0 0; }
+  .run-card > .meta          { grid-column: 1 / -1; grid-row: 2;
+                                padding-bottom: 10px; border-bottom: 2px dashed var(--panel-grey); }
+  .run-card > .chart-wrap    { grid-column: 1; grid-row: 3;
+                                padding-top: 10px; padding-bottom: 12px; }
+  .run-card > .tally         { grid-column: 1; grid-row: 4;
+                                padding-top: 8px; padding-bottom: 14px;
+                                border-radius: 0 0 0 9px;
+                                border-top: 2px dashed var(--panel-grey); }
+  .run-card > .thinking-wrap { grid-column: 2; grid-row: 3 / span 2;
+                                padding-top: 12px; padding-bottom: 14px;
+                                border-radius: 0 0 9px 0;
+                                border-left: 3px solid var(--panel-grey);
+                                display: flex; flex-direction: column; min-height: 0; }
+
+  .run-card h3 {
+    margin: 0; font-size: 19px; font-weight: normal;
+    color: var(--panel-black);
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 14px;
+  }
+  .run-card .meta { color: var(--text-muted); font-size: 15px; margin: 0; }
+  /* Chart stretches to fill the left column — the right column's thinking
+     log tends to be the tallest element, so the chart grows to match and
+     fills what was previously an ugly grey gap. Balatro logo sits as a
+     subtle watermark behind the plotted area. */
+  .run-card .chart-wrap {
+    position: relative;
+    min-height: 340px;
+    height: 100%;
+    margin: 0;
+    background-image: url("/static/balatro/textures/balatro.png");
+    background-repeat: no-repeat;
+    background-position: center 58%;
+    background-size: 42% auto;
+    background-blend-mode: multiply;
+  }
+  /* Dim the watermark so the chart lines read cleanly over it. */
+  .run-card .chart-wrap::before {
+    content: ""; position: absolute; inset: 0;
+    background: rgba(240,230,194,0.78);
+    pointer-events: none;
+  }
+  .run-card .chart-wrap canvas { position: relative; z-index: 1; }
+  /* Stat tiles — styled like Balatro's score/hand/$/ante chips. The JS
+     emits each tally item as a <div>, so we chip-style div children. */
+  .run-card .tally {
+    display: flex; gap: 10px; margin: 0; font-size: 14px;
+    color: var(--text-muted); flex-wrap: wrap;
+  }
+  .run-card .tally b { color: var(--panel-black); font-size: 15px; }
+  .run-card .tally > div {
+    background: var(--panel-grey);
+    border: 2px solid var(--panel-black);
+    border-radius: 7px;
+    padding: 5px 12px;
+    color: var(--text-dark);
+    letter-spacing: 0.5px;
+    box-shadow: 0 2px 0 var(--panel-black);
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+
+  /* "Model thinking" log — keep it readable; swap monospace to m6x11plus too */
+  .thinking-wrap { margin: 0; border-top: 2px dashed var(--panel-grey); }
+  .thinking-header {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 14px; letter-spacing: 0.5px; color: var(--text-muted);
+    user-select: none; padding-top: 2px;
+  }
+  .thinking-header .toggle { color: var(--balatro-blue); }
+  .thinking-live { display: inline-flex; align-items: center; gap: 6px; color: var(--balatro-orange); }
+  .thinking-live .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--balatro-orange);
+    animation: pulse 1.2s infinite;
+  }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
-  .thinking-log { margin-top: 8px; max-height: 280px; overflow-y: auto;
-    background: #0b0d12; border: 1px solid var(--border); border-radius: 6px;
-    padding: 8px; font-family: "SF Mono", Menlo, Consolas, monospace;
-    font-size: 11.5px; line-height: 1.5; color: #c9cfd9; }
+  .thinking-log {
+    margin-top: 10px; flex: 1 1 auto; min-height: 260px; max-height: 560px;
+    overflow-y: auto;
+    background: #fffaf0; border: 2px solid var(--panel-grey);
+    border-radius: 7px; padding: 10px;
+    font-family: inherit; font-size: 14px; line-height: 1.4;
+    color: var(--text-dark);
+  }
   .thinking-log.collapsed { display: none; }
-  .thinking-entry { margin-bottom: 10px; padding-bottom: 8px;
-    border-bottom: 1px dashed #232836; }
+  .thinking-entry { margin-bottom: 12px; padding-bottom: 10px;
+    border-bottom: 2px dashed var(--panel-grey); }
   .thinking-entry:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
-  .thinking-entry .t-head { color: var(--muted); font-size: 10.5px;
-    margin-bottom: 4px; display: flex; gap: 10px; flex-wrap: wrap; }
-  .thinking-entry .t-head .turn { color: var(--accent); font-weight: 600; }
-  .thinking-entry .t-head .ok { color: var(--good); }
-  .thinking-entry .t-head .bad { color: var(--bad); }
-  .thinking-entry .t-body { white-space: pre-wrap; word-break: break-word;
-    color: #d6dbe5; }
-  .thinking-entry .t-action { margin-top: 6px; color: var(--accent-2);
-    font-weight: 600; }
-  .thinking-entry.thinking-pending { color: var(--warn); font-style: italic; }
+  .thinking-entry .t-head { color: var(--text-muted); font-size: 12px;
+    margin-bottom: 5px; display: flex; gap: 12px; flex-wrap: wrap; letter-spacing: 0.5px; }
+  .thinking-entry .t-head .turn { color: var(--balatro-red); }
+  .thinking-entry .t-head .ok { color: var(--balatro-green); }
+  .thinking-entry .t-head .bad { color: var(--balatro-red); }
+  .thinking-entry .t-body { white-space: pre-wrap; word-break: break-word; color: var(--text-dark); }
+  .thinking-entry .t-action { margin-top: 6px; color: var(--balatro-blue); }
+  .thinking-entry.thinking-pending { color: var(--balatro-orange); font-style: italic; }
   .state-block { margin-bottom: 6px; }
-  .state-block details { background: #0e1017; border: 1px solid #222837;
-    border-radius: 4px; padding: 0; }
-  .state-block summary { cursor: pointer; color: var(--muted);
-    font-size: 10.5px; padding: 5px 8px; user-select: none; list-style: none; }
+  .state-block details { background: #fffaf0; border: 2px solid var(--panel-grey);
+    border-radius: 6px; padding: 0; }
+  .state-block summary { cursor: pointer; color: var(--text-muted);
+    font-size: 13px; padding: 6px 10px; user-select: none; list-style: none;
+    letter-spacing: 0.5px; }
   .state-block summary::-webkit-details-marker { display: none; }
-  .state-block summary::before { content: "▸ "; color: var(--accent-2); }
+  .state-block summary::before { content: "▸ "; color: var(--balatro-blue); }
   .state-block details[open] summary::before { content: "▾ "; }
-  .state-block summary:hover { color: var(--text); }
-  .state-block pre { margin: 0; padding: 8px; background: #07090e;
-    border-top: 1px solid #222837; color: #a8b0c0; font-size: 10.5px;
-    line-height: 1.45; white-space: pre-wrap; word-break: break-word;
-    max-height: 260px; overflow-y: auto; }
+  .state-block summary:hover { color: var(--panel-black); }
+  .state-block pre { margin: 0; padding: 10px; background: #faf0d9;
+    border-top: 2px solid var(--panel-grey); color: var(--text-dark);
+    font-family: inherit; font-size: 13px; line-height: 1.45;
+    white-space: pre-wrap; word-break: break-word;
+    max-height: 300px; overflow-y: auto; }
 
-  .datalist-hint { font-size: 11px; color: var(--muted); margin-top: 3px; }
+  .datalist-hint { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
 
-  .history-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .history-table th, .history-table td { text-align: left; padding: 8px 10px;
-    border-bottom: 1px solid var(--border); }
-  .history-table th { color: var(--muted); font-weight: 600; font-size: 11px;
-    text-transform: uppercase; letter-spacing: 0.3px; }
-  .history-table tr:hover { background: var(--panel-2); }
-  .history-table .model-cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis;
-    white-space: nowrap; }
+  /* History table restyled as a cream sheet */
+  .history-table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  .history-table th, .history-table td {
+    text-align: left; padding: 10px 12px;
+    border-bottom: 2px dashed var(--panel-grey);
+  }
+  .history-table th {
+    color: var(--text-muted); font-size: 13px; letter-spacing: 0.8px;
+  }
+  .history-table tr:hover { background: rgba(191,199,213,0.25); }
+  .history-table .model-cell { max-width: 260px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
 
-  .pill { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 11px;
-    font-weight: 600; }
-  .pill.win { background: var(--good); color: #000; }
-  .pill.loss { background: var(--bad); color: #fff; }
+  .pill {
+    display: inline-block; padding: 2px 10px; border-radius: 7px;
+    font-size: 13px; letter-spacing: 0.5px;
+    border: 2px solid var(--panel-black);
+  }
+  .pill.win  { background: var(--balatro-green); color: var(--panel-black); }
+  .pill.loss { background: var(--balatro-red);   color: #fffaf0; }
+
+  /* Scrollbars themed to match */
+  ::-webkit-scrollbar { width: 12px; height: 12px; }
+  ::-webkit-scrollbar-track { background: var(--panel-grey); border-radius: 6px; }
+  ::-webkit-scrollbar-thumb { background: var(--panel-black); border-radius: 6px;
+    border: 2px solid var(--panel-grey); }
 </style>
 </head>
 <body>
+<canvas id="balatro-bg"></canvas>
 <header>
   <h1>Balatro<span>Bench</span> <span class="tag">AI Benchmark Dashboard</span></h1>
   <div id="global-status"><span class="badge idle" id="job-badge">idle</span></div>
@@ -221,6 +432,38 @@ async function api(path, opts) {
   return r.json();
 }
 
+// Chart.js plugin: paint a purple band behind the chart wherever the run
+// was in a non-playing phase (shop / blind-select / pack). Reads chart.$shopMask
+// which each run's event handler keeps in sync with the plotted labels.
+Chart.register({
+  id: "shopShade",
+  beforeDatasetsDraw(chart) {
+    const mask = chart.$shopMask;
+    if (!mask || !mask.length) return;
+    const { ctx, chartArea, scales } = chart;
+    const x = scales.x;
+    if (!x) return;
+    ctx.save();
+    ctx.fillStyle = "rgba(136,103,165,0.22)";  // Balatro PURPLE with alpha
+    let rangeStart = null;
+    for (let i = 0; i <= mask.length; i++) {
+      const inShop = i < mask.length && mask[i];
+      if (inShop && rangeStart === null) rangeStart = i;
+      if (!inShop && rangeStart !== null) {
+        const endIdx = i - 1;
+        const xStart = x.getPixelForValue(rangeStart);
+        const xEnd   = x.getPixelForValue(endIdx);
+        // Widen slightly so single-point shop blips still show as a visible band
+        const left = xStart - 4;
+        const width = Math.max(8, xEnd - xStart + 8);
+        ctx.fillRect(left, chartArea.top, width, chartArea.bottom - chartArea.top);
+        rangeStart = null;
+      }
+    }
+    ctx.restore();
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Load models + settings
 // ---------------------------------------------------------------------------
@@ -290,17 +533,33 @@ function createRunCard(runId, index) {
         {
           label: "Current score",
           data: [],
-          borderColor: "#4ba6ff",
-          backgroundColor: "rgba(75,166,255,0.15)",
+          borderColor: "#009dff",       // Balatro BLUE
+          backgroundColor: "rgba(0,157,255,0.18)",
+          borderWidth: 3,
           tension: 0.25,
-          pointRadius: 2,
+          pointRadius: 3,
+          pointBackgroundColor: "#009dff",
           fill: true,
+          spanGaps: false,
         },
         {
           label: "Target",
           data: [],
-          borderColor: "#ff9f43",
-          borderDash: [4, 4],
+          borderColor: "#fda200",       // Balatro ORANGE
+          borderWidth: 3,
+          borderDash: [6, 4],
+          pointRadius: 0,
+          fill: false,
+          spanGaps: false,
+        },
+        {
+          // Purely a legend/color entry. The actual purple band is painted
+          // by the `shopShade` plugin using chart.$shopMask. Data stays empty.
+          label: "Shop",
+          data: [],
+          borderColor: "#8867a5",       // Balatro PURPLE
+          backgroundColor: "rgba(136,103,165,0.35)",
+          borderWidth: 2,
           pointRadius: 0,
           fill: false,
         },
@@ -308,23 +567,24 @@ function createRunCard(runId, index) {
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      interaction: { mode: "index", intersect: false },
+      // Disable hover entirely — no tooltip, no point-highlight, no cursor
+      // change when moving over the chart. The graph is purely presentational.
+      events: [],
       animation: { duration: 250 },
       plugins: {
-        legend: { labels: { color: "#e6e9ef", boxWidth: 10 } },
-        tooltip: {
-          callbacks: {
-            title: (items) => `Action #${items[0].label}`,
-            label: (item) => `${item.dataset.label}: ${fmt(item.parsed.y)}`,
-          },
-        },
+        legend: { labels: { color: "#374244", boxWidth: 14, font: { family: "m6x11plus", size: 14 } } },
+        tooltip: { enabled: false },
       },
       scales: {
-        x: { ticks: { color: "#8a93a6" }, grid: { color: "#2a2f3d" },
-             title: { display: true, text: "Action #", color: "#8a93a6" } },
-        y: { ticks: { color: "#8a93a6", callback: (v) => Number(v).toLocaleString() },
-             grid: { color: "#2a2f3d" }, beginAtZero: true,
-             title: { display: true, text: "Chips", color: "#8a93a6" } },
+        x: { ticks: { color: "#6f8389", font: { family: "m6x11plus", size: 13 },
+                      autoSkip: true, maxTicksLimit: 16 },
+             grid: { color: "rgba(191,199,213,0.6)" },
+             title: { display: true, text: "Action #", color: "#6f8389", font: { family: "m6x11plus", size: 13 } } },
+        y: { ticks: { color: "#6f8389", font: { family: "m6x11plus", size: 13 },
+                      callback: (v) => Number(v).toLocaleString() },
+             grid: { color: "rgba(191,199,213,0.6)" },
+             beginAtZero: true,
+             title: { display: true, text: "Chips", color: "#6f8389", font: { family: "m6x11plus", size: 13 } } },
       },
     },
   });
@@ -334,7 +594,12 @@ function createRunCard(runId, index) {
                   thinkingCount: 0, pendingThinkEl: null,
                   // pendingStateText holds the most recent full state_text
                   // event, to be attached to the NEXT model_response entry.
-                  pendingStateText: null };
+                  pendingStateText: null,
+                  // shopMask[i] = true when labels[i] represents a non-playing
+                  // phase (shop / blind-select / pack). The shopShade plugin
+                  // paints purple bands wherever the mask is true.
+                  shopMask: [] };
+  chart.$shopMask = entry.shopMask;
   runCards.set(runId, entry);
 
   // Wire up the "hide/show model thinking" toggle. Default = expanded so
@@ -376,23 +641,30 @@ function handleRunEvent(runId, evt) {
     entry.pendingStateText = evt.text;
   } else if (evt.type === "state") {
     entry.lastState = evt;
-    // Only plot points when we're actually in a blind (target > 0). In
-    // shop / blind-select / game-over phases target is 0 or null, and
-    // plotting it would drag the chart down to zero between rounds.
-    if (evt.current_score !== null && evt.target_score) {
-      const label = String(evt.action_index);
-      const xs = chart.data.labels;
-      if (xs[xs.length - 1] !== label) {
-        xs.push(label);
-        chart.data.datasets[0].data.push(evt.current_score);
-        chart.data.datasets[1].data.push(evt.target_score);
-        chart.update("none");
-      } else {
-        chart.data.datasets[0].data[xs.length - 1] = evt.current_score;
-        chart.data.datasets[1].data[xs.length - 1] = evt.target_score;
-        chart.update("none");
-      }
+    // Plot EVERY state event. Playing phases get real score/target values;
+    // non-playing phases (shop / blind-select / packs) get nulls so the
+    // line breaks, and we mark those indices in shopMask so the shopShade
+    // plugin paints a purple band behind them. This makes each round read
+    // as its own clean arch with the shop interludes clearly demarcated.
+    const label = String(evt.action_index);
+    const xs = chart.data.labels;
+    const isPlaying = evt.current_score !== null && evt.target_score;
+    const scoreVal  = isPlaying ? evt.current_score : null;
+    const targetVal = isPlaying ? evt.target_score  : null;
+
+    if (xs[xs.length - 1] === label) {
+      // Same action_index came through again — update in place.
+      const i = xs.length - 1;
+      chart.data.datasets[0].data[i] = scoreVal;
+      chart.data.datasets[1].data[i] = targetVal;
+      entry.shopMask[i] = !isPlaying;
+    } else {
+      xs.push(label);
+      chart.data.datasets[0].data.push(scoreVal);
+      chart.data.datasets[1].data.push(targetVal);
+      entry.shopMask.push(!isPlaying);
     }
+    chart.update("none");
     const parts = [];
     if (evt.ante) parts.push(`Ante ${evt.ante}/8`);
     if (evt.round_label) parts.push(evt.round_label);
@@ -681,6 +953,176 @@ $("#auto-restart").addEventListener("change", async () => {
   await Promise.all([loadModels(), loadSettings(), loadHistory()]);
   setInterval(pollStatus, 1500);
   pollStatus();
+})();
+</script>
+
+<!-- ===================================================================== -->
+<!-- Balatro theming: animated swirl background + UI click/hover sounds    -->
+<!-- ===================================================================== -->
+<script>
+// ---------- WebGL swirl background (ported from Balatro's background.fs) ----------
+(function(){
+  const canvas = document.getElementById("balatro-bg");
+  const gl = canvas.getContext("webgl", { premultipliedAlpha: false, antialias: false });
+  if (!gl) { canvas.style.background = "linear-gradient(135deg, #174C6B, #3DAEB5)"; return; }
+
+  function resize(){
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width  = Math.floor(window.innerWidth  * dpr);
+    canvas.height = Math.floor(window.innerHeight * dpr);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  resize();
+  window.addEventListener("resize", resize);
+
+  // Fullscreen triangle — one draw covers the whole viewport
+  const vsrc = `
+    attribute vec2 a_pos;
+    void main(){ gl_Position = vec4(a_pos, 0.0, 1.0); }
+  `;
+  // Ported from resources/shaders/background.fs. Same math, just reshaped
+  // for GLSL ES 1.0 (no LÖVE 'effect' entry point, explicit uniforms).
+  const fsrc = `
+    precision mediump float;
+    uniform vec2  iResolution;
+    uniform float iTime;
+    uniform float iSpinTime;
+    uniform vec4  iColour1;
+    uniform vec4  iColour2;
+    uniform vec4  iColour3;
+    uniform float iContrast;
+    uniform float iSpinAmount;
+
+    #define PIXEL_SIZE_FAC 700.
+    #define SPIN_EASE 0.5
+
+    void main(){
+      vec2 screen_coords = gl_FragCoord.xy;
+      float pixel_size = length(iResolution.xy) / PIXEL_SIZE_FAC;
+      vec2 uv = (floor(screen_coords.xy*(1./pixel_size))*pixel_size - 0.5*iResolution.xy)/length(iResolution.xy) - vec2(0.12, 0.);
+      float uv_len = length(uv);
+
+      float speed = (iSpinTime*SPIN_EASE*0.2) + 302.2;
+      float new_pixel_angle = atan(uv.y, uv.x) + speed - SPIN_EASE*20.*(1.*iSpinAmount*uv_len + (1. - 1.*iSpinAmount));
+      vec2 mid = (iResolution.xy/length(iResolution.xy))/2.;
+      uv = vec2(uv_len * cos(new_pixel_angle) + mid.x, uv_len * sin(new_pixel_angle) + mid.y) - mid;
+
+      uv *= 30.;
+      speed = iTime*2.;
+      vec2 uv2 = vec2(uv.x+uv.y);
+      for(int i=0; i<5; i++){
+        uv2 += sin(max(uv.x, uv.y)) + uv;
+        uv  += 0.5*vec2(cos(5.1123314 + 0.353*uv2.y + speed*0.131121), sin(uv2.x - 0.113*speed));
+        uv  -= 1.0*cos(uv.x + uv.y) - 1.0*sin(uv.x*0.711 - uv.y);
+      }
+
+      float contrast_mod = (0.25*iContrast + 0.5*iSpinAmount + 1.2);
+      float paint_res = min(2., max(0., length(uv)*(0.035)*contrast_mod));
+      float c1p = max(0., 1. - contrast_mod*abs(1.-paint_res));
+      float c2p = max(0., 1. - contrast_mod*abs(paint_res));
+      float c3p = 1. - min(1., c1p + c2p);
+
+      vec4 ret_col = (0.3/iContrast)*iColour1 + (1. - 0.3/iContrast)*(iColour1*c1p + iColour2*c2p + vec4(c3p*iColour3.rgb, c3p*iColour1.a));
+      gl_FragColor = ret_col;
+    }
+  `;
+
+  function compile(type, src){
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error("Shader compile:", gl.getShaderInfoLog(s));
+    }
+    return s;
+  }
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsrc));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsrc));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error("Program link:", gl.getProgramInfoLog(prog));
+  }
+  gl.useProgram(prog);
+
+  // Fullscreen quad (two triangles)
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1,-1,  1,-1,  -1, 1,
+    -1, 1,  1,-1,   1, 1,
+  ]), gl.STATIC_DRAW);
+  const loc_pos = gl.getAttribLocation(prog, "a_pos");
+  gl.enableVertexAttribArray(loc_pos);
+  gl.vertexAttribPointer(loc_pos, 2, gl.FLOAT, false, 0, 0);
+
+  const u_res         = gl.getUniformLocation(prog, "iResolution");
+  const u_time        = gl.getUniformLocation(prog, "iTime");
+  const u_spin        = gl.getUniformLocation(prog, "iSpinTime");
+  const u_c1          = gl.getUniformLocation(prog, "iColour1");
+  const u_c2          = gl.getUniformLocation(prog, "iColour2");
+  const u_c3          = gl.getUniformLocation(prog, "iColour3");
+  const u_contrast    = gl.getUniformLocation(prog, "iContrast");
+  const u_spin_amount = gl.getUniformLocation(prog, "iSpinAmount");
+
+  // Balatro's menu-ish palette: deep blue + teal + cream, the classic feel.
+  gl.uniform4f(u_c1, 0.09, 0.22, 0.35, 1.0); // deep blue-teal
+  gl.uniform4f(u_c2, 0.24, 0.68, 0.70, 1.0); // brighter teal
+  gl.uniform4f(u_c3, 0.96, 0.91, 0.70, 1.0); // cream highlights
+  gl.uniform1f(u_contrast, 3.5);
+  gl.uniform1f(u_spin_amount, 0.25);
+
+  const t0 = performance.now();
+  function frame(){
+    const t = (performance.now() - t0) / 1000;
+    gl.uniform2f(u_res, canvas.width, canvas.height);
+    gl.uniform1f(u_time, t);
+    gl.uniform1f(u_spin, t);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    requestAnimationFrame(frame);
+  }
+  frame();
+})();
+
+// ---------- UI sound effects (uses Balatro's own .ogg clips) ----------
+(function(){
+  const pools = {};
+  function play(name, vol){
+    if (!pools[name]) {
+      pools[name] = [];
+      for (let i = 0; i < 4; i++) {
+        const a = new Audio(`/static/balatro/sounds/${name}.ogg`);
+        a.preload = "auto";
+        pools[name].push(a);
+      }
+    }
+    // Round-robin so rapid clicks don't clobber each other
+    const pool = pools[name];
+    const a = pool.find(x => x.paused || x.ended) || pool[0];
+    a.currentTime = 0;
+    a.volume = vol ?? 0.35;
+    a.play().catch(()=>{}); // Browser blocks audio until first user gesture — fine
+  }
+
+  // Primary action = 'button'; cancel-style = 'cancel'; everything else = 'generic1'.
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b || b.disabled) return;
+    if (b.classList.contains("primary"))      play("button", 0.45);
+    else if (b.classList.contains("danger"))  play("cancel", 0.4);
+    else                                       play("generic1", 0.3);
+  }, true);
+
+  // Hover = Balatro's highlight1 blip, throttled so sweeping across a row
+  // doesn't sound like a broken slot machine.
+  let lastHover = 0;
+  document.addEventListener("pointerover", (e) => {
+    const b = e.target.closest("button, select, input");
+    if (!b || b.disabled) return;
+    const now = performance.now();
+    if (now - lastHover < 120) return;
+    lastHover = now;
+    play("highlight1", 0.15);
+  }, true);
 })();
 </script>
 </body>

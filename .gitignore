@@ -19,6 +19,15 @@ venv/
 # into the dashboard "API Key" field, so it is NOT committed.
 .webapp_settings.json
 
+# Claude Code per-project state (launch config, local settings)
+.claude/
+
+# Balatro UI assets extracted from Balatro.exe for dashboard theming.
+# These are copyrighted game content — each user runs
+#   python -m bench.static.extract_balatro_assets
+# to populate this directory from their own Steam install.
+bench/static/balatro/
+
 # Benchmark run artifacts (local-only; they can be large and contain
 # full verbatim model responses / game state dumps)
 results.jsonl

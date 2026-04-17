@@ -3,6 +3,7 @@
 import json
 import os
 import time
+from collections.abc import Iterator
 
 import requests
 
@@ -131,6 +132,119 @@ class ModelAdapter:
         }
 
         return text, usage_info
+
+    def chat_stream(self, messages: list[dict]) -> Iterator[tuple[str, object]]:
+        """Streaming chat completion. Yields:
+            ("delta", text_chunk)            # zero or more
+            ("done",  {"text": full, "usage": {...}})   # exactly once on success
+            ("error", {"error": "..."})      # instead of "done" on failure
+        """
+        url = f"{self.endpoint}/chat/completions"
+
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.provider == "openrouter":
+            headers["HTTP-Referer"] = "https://github.com/BalatroBench"
+            headers["X-Title"] = "BalatroBench"
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": True,
+        }
+
+        start_time = time.time()
+        full_parts: list[str] = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        finish_reason = None
+
+        try:
+            response = requests.post(
+                url, json=payload, headers=headers,
+                stream=True, timeout=(10, 300),
+            )
+            response.raise_for_status()
+
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if not raw_line:
+                    continue
+                line = raw_line.strip()
+                # OpenRouter keepalive comments start with ':'
+                if line.startswith(":"):
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+
+                choices = chunk.get("choices") or []
+                if choices:
+                    choice = choices[0]
+                    delta = choice.get("delta") or {}
+                    # Reasoning channel (R1-style) + content channel. Emit in
+                    # arrival order; the overlay doesn't need to distinguish.
+                    piece = ""
+                    reasoning = delta.get("reasoning")
+                    if isinstance(reasoning, str) and reasoning:
+                        piece += reasoning
+                    content = delta.get("content")
+                    if isinstance(content, str) and content:
+                        piece += content
+                    if piece:
+                        full_parts.append(piece)
+                        yield ("delta", piece)
+                    fr = choice.get("finish_reason") or choice.get("native_finish_reason")
+                    if fr:
+                        finish_reason = fr
+
+                usage = chunk.get("usage")
+                if isinstance(usage, dict):
+                    prompt_tokens = usage.get("prompt_tokens", prompt_tokens) or prompt_tokens
+                    completion_tokens = usage.get("completion_tokens", completion_tokens) or completion_tokens
+
+        except requests.exceptions.Timeout:
+            yield ("error", {"error": "Request timed out"})
+            return
+        except requests.exceptions.ConnectionError:
+            yield ("error", {"error": f"Cannot connect to {url}"})
+            return
+        except requests.exceptions.HTTPError as e:
+            body = ""
+            try:
+                body = response.json().get("error", {}).get("message", str(e))
+            except Exception:
+                body = str(e)
+            yield ("error", {"error": f"HTTP {response.status_code}: {body}"})
+            return
+        except Exception as e:  # noqa: BLE001 — network/parsing is varied
+            yield ("error", {"error": f"Stream failed: {e}"})
+            return
+
+        elapsed = time.time() - start_time
+        full_text = "".join(full_parts)
+        self.total_prompt_tokens += prompt_tokens
+        self.total_completion_tokens += completion_tokens
+        self.total_requests += 1
+
+        yield ("done", {
+            "text": full_text,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "elapsed_seconds": elapsed,
+                "finish_reason": finish_reason,
+            },
+        })
 
     def get_total_usage(self) -> dict:
         """Get cumulative token usage."""

@@ -61,7 +61,10 @@ class BalatroBenchClient:
         """Send a JSON message."""
         if not self.sock:
             raise ConnectionError("Not connected")
-        msg = json.dumps(data) + "\n"
+        # ensure_ascii=False keeps non-ASCII (em-dashes, smart quotes, etc.)
+        # as raw UTF-8 bytes instead of \uXXXX escapes, which the mod's
+        # minimal Lua JSON decoder doesn't un-escape.
+        msg = json.dumps(data, ensure_ascii=False) + "\n"
         self.sock.sendall(msg.encode("utf-8"))
 
     def recv_until_end(self) -> str:

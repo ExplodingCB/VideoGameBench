@@ -46,6 +46,45 @@ def _parse_score(state_text):
     }
 
 
+class _ActionBlockStripper:
+    """Feeds streaming chunks through; once `{"action"` appears, swallows the rest.
+
+    We buffer the trailing 10 chars between emits so we don't leak a half-started
+    `{"acti` prefix before the full pattern confirms it's the action block.
+    """
+
+    _RE = re.compile(r'\{\s*"action"')
+
+    def __init__(self):
+        self.buf = ""
+        self.emitted = 0
+        self.cut = None
+
+    def feed(self, chunk: str) -> str:
+        if self.cut is not None:
+            self.buf += chunk
+            return ""
+        self.buf += chunk
+        m = self._RE.search(self.buf, max(0, self.emitted - 2))
+        if m:
+            self.cut = m.start()
+            end = self.cut
+        else:
+            end = max(self.emitted, len(self.buf) - 10)
+        out = self.buf[self.emitted:end]
+        self.emitted = end
+        return out
+
+    def flush(self) -> str:
+        """Emit any 10-char holdback we haven't released yet.
+        Call on stream end when no action block was detected."""
+        if self.cut is not None:
+            return ""
+        out = self.buf[self.emitted:]
+        self.emitted = len(self.buf)
+        return out
+
+
 class EventLogger:
     """Appends JSON lines to run_events/<run_id>.jsonl so the webapp can
     stream live per-action data back to the browser. Safe if EVENTS_DIR is
@@ -76,6 +115,92 @@ class BenchmarkRunner:
         self.max_retries = max_retries
         self.verbose = verbose
         self.event_logger = event_logger
+
+    def _jimbo_send(self, msg: dict):
+        """Fire-and-forget overlay message. Swallow send errors so a broken
+        overlay connection never kills the benchmark."""
+        try:
+            self.client.send_json(msg)
+        except Exception:  # noqa: BLE001 — overlay is cosmetic, keep running
+            pass
+
+    def _chat_with_jimbo(self, messages, action_index, attempt, use_jimbo):
+        """Drive chat_stream and forward visible tokens to the overlay mod.
+
+        Returns (response_text, usage) matching ModelAdapter.chat()'s shape.
+        Falls back to non-streaming chat() on any failure, in which case the
+        overlay still gets the full text as one synthetic token.
+        """
+        # Cache the display name once: strip the provider prefix (everything
+        # up to and including the first '/') and swap '-' for ' '.
+        # e.g. "x-ai/grok-4.1-fast" -> "grok 4.1 fast"
+        if not hasattr(self, "_jimbo_model_name"):
+            raw = (self.model.model or "")
+            self._jimbo_model_name = raw.split("/", 1)[-1].replace("-", " ")
+
+        self._jimbo_send({
+            "type": "jimbo_thinking_start",
+            "action_index": action_index,
+            "attempt": attempt,
+            "model_name": self._jimbo_model_name,
+        })
+
+        stripper = _ActionBlockStripper()
+        response_text = ""
+        usage: dict = {}
+        stream_err = None
+
+        try:
+            stream = self.model.chat_stream(messages)
+        except AttributeError:
+            stream = None
+
+        if stream is not None:
+            try:
+                for kind, payload in stream:
+                    if kind == "delta":
+                        visible = stripper.feed(payload)
+                        if visible:
+                            self._jimbo_send({
+                                "type": "jimbo_token",
+                                "text": visible,
+                                "action_index": action_index,
+                            })
+                    elif kind == "done":
+                        response_text = payload.get("text", "")
+                        usage = payload.get("usage") or {}
+                        tail = stripper.flush()
+                        if tail:
+                            self._jimbo_send({
+                                "type": "jimbo_token",
+                                "text": tail,
+                                "action_index": action_index,
+                            })
+                        break
+                    elif kind == "error":
+                        stream_err = payload.get("error", "stream error")
+                        break
+            except Exception as e:  # noqa: BLE001
+                stream_err = f"Stream iteration failed: {e}"
+
+        if not response_text and stream_err is None and stream is None:
+            stream_err = "chat_stream unavailable"
+
+        self._jimbo_send({"type": "jimbo_thinking_end", "action_index": action_index})
+
+        if stream_err is not None:
+            # Fall back to non-streaming; still feed the bubble so something shows
+            response_text, usage = self.model.chat(messages)
+            if response_text and "error" not in usage:
+                visible = _ActionBlockStripper().feed(response_text)
+                if visible:
+                    self._jimbo_send({
+                        "type": "jimbo_token",
+                        "text": visible,
+                        "action_index": action_index,
+                    })
+
+        return response_text, usage
 
     def _drain(self):
         """Drain all buffered data from socket."""
@@ -291,7 +416,10 @@ class BenchmarkRunner:
                             attempt=retries + 1,
                             max_attempts=self.max_retries + 1)
 
-                response_text, usage = self.model.chat(messages)
+                use_jimbo = os.environ.get("BALATROBENCH_JIMBO") == "1"
+                response_text, usage = self._chat_with_jimbo(
+                    messages, action_count, retries + 1, use_jimbo
+                ) if use_jimbo else self.model.chat(messages)
 
                 if "error" in usage:
                     print(f"\n  [!] API error: {usage['error']}")
@@ -359,6 +487,9 @@ class BenchmarkRunner:
 
             # Send action to mod and wait for game to process
             self._send_action_and_wait(action)
+
+            if os.environ.get("BALATROBENCH_JIMBO") == "1":
+                self._jimbo_send({"type": "jimbo_dispatched", "action_index": action_count})
 
         # Build result
         elapsed = time.time() - start_time
