@@ -15,7 +15,6 @@ local waiting_for_action = false
 local state_sent = false
 local last_phase = nil
 local last_state_key = nil
-local fast_mode = os.getenv("BALATROBENCH_FAST") == "1"
 local run_start_time = nil
 local action_count = 0
 local invalid_action_count = 0
@@ -25,6 +24,10 @@ local action_cooldown = 0  -- frames to wait after action before sending new sta
 local phase_before_action = nil  -- track phase before action to detect real transitions
 local state_key_before_action = nil  -- track state_key to detect in-phase effects (shop buys, sells, rerolls)
 local wait_deadline = nil  -- hard upper bound (os.clock seconds) before we give up waiting for a transition
+local VANILLA_MAX_GAMESPEED = 4
+local benchmark_settings_saved = nil
+local benchmark_settings_forced = false
+local last_connection_state = false
 
 ---------------------------------------------------------------------------
 -- Initialization
@@ -41,20 +44,38 @@ function BalatroBench.init()
 
     active = true
 
-    if fast_mode then
-        BalatroBench.enable_fast_mode()
-    end
-
     print("[BalatroBench] Ready. Waiting for AI client on port " ..
           tostring(tonumber(os.getenv("BALATROBENCH_PORT")) or 12345))
 end
 
-function BalatroBench.enable_fast_mode()
+function BalatroBench.begin_benchmark_settings()
+    if not (G and G.SETTINGS) then return end
+    if not benchmark_settings_saved then
+        benchmark_settings_saved = {
+            gamespeed = G.SETTINGS.GAMESPEED,
+            reduced_motion = G.SETTINGS.reduced_motion,
+        }
+    end
+    benchmark_settings_forced = true
+    BalatroBench.apply_benchmark_settings()
+end
+
+function BalatroBench.apply_benchmark_settings()
     if G and G.SETTINGS then
-        G.SETTINGS.GAMESPEED = 10
+        G.SETTINGS.GAMESPEED = VANILLA_MAX_GAMESPEED
         G.SETTINGS.reduced_motion = true
     end
-    print("[BalatroBench] Fast mode enabled")
+end
+
+function BalatroBench.restore_benchmark_settings()
+    if not (benchmark_settings_saved and G and G.SETTINGS) then
+        benchmark_settings_forced = false
+        return
+    end
+    G.SETTINGS.GAMESPEED = benchmark_settings_saved.gamespeed
+    G.SETTINGS.reduced_motion = benchmark_settings_saved.reduced_motion
+    benchmark_settings_saved = nil
+    benchmark_settings_forced = false
 end
 
 ---------------------------------------------------------------------------
@@ -78,8 +99,18 @@ end
 function BalatroBench.update(dt)
     if not active or not server then return end
 
+    local connected = server:is_connected()
+    if last_connection_state and not connected then
+        BalatroBench.restore_benchmark_settings()
+    end
+    last_connection_state = connected
+
+    if benchmark_settings_forced then
+        BalatroBench.apply_benchmark_settings()
+    end
+
     -- Accept new connections (non-blocking)
-    if not server:is_connected() then
+    if not connected then
         server:accept_client()
         if server:is_connected() then
             server:send_json({
@@ -94,6 +125,7 @@ function BalatroBench.update(dt)
             phase_before_action = nil
             state_key_before_action = nil
             wait_deadline = nil
+            last_connection_state = true
         end
         return
     end
@@ -217,6 +249,7 @@ function BalatroBench.handle_message(msg)
         -- Handle quit
         if msg.action == "quit" then
             BalatroBench.send_final_results()
+            BalatroBench.restore_benchmark_settings()
             active = false
             return
         end
@@ -298,6 +331,7 @@ function BalatroBench.start_new_run(deck, stake, seed)
     wait_deadline = nil
 
     print("[BalatroBench] Starting new run - deck: " .. tostring(deck) .. " stake: " .. tostring(stake))
+    BalatroBench.begin_benchmark_settings()
 
     if not G then
         server:send_json({type = "error", error = "Game object not ready"})
@@ -400,6 +434,7 @@ end
 ---------------------------------------------------------------------------
 
 function BalatroBench.shutdown()
+    BalatroBench.restore_benchmark_settings()
     if server then
         BalatroBench.send_final_results()
         server:stop()
