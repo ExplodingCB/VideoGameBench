@@ -903,6 +903,50 @@ function Actions.pack_select(data)
                 name, required_targets, index)}
         end
 
+        -- SLOT-CAP PREFLIGHT: Balatro's pack-card use path does NOT
+        -- enforce the joker/consumable slot cap in all code paths. A
+        -- model with 5/5 jokers that opened a Buffoon pack was seen
+        -- to end up with 6/5 jokers — Balatro let the overflow happen
+        -- silently and the run corrupted from there. The in-game UI
+        -- blocks this with a "sell a joker first" prompt, but that
+        -- prompt doesn't fire when we invoke use_card directly.
+        --
+        -- Enforce it here. Negative-edition cards are EXEMPT because
+        -- they carry their own +1-slot bonus and never occupy a slot.
+        local set = card.ability and card.ability.set
+        local is_negative = card.edition and card.edition.negative == true
+        if set == "Joker" and not is_negative then
+            local owned = (G.jokers and G.jokers.cards and #G.jokers.cards) or 0
+            local cap = (G.jokers and G.jokers.config and G.jokers.config.card_limit) or 5
+            if owned >= cap then
+                local name = (card.ability and card.ability.name) or "This Joker"
+                return {error = string.format(
+                    "Joker slots are full (%d/%d). Balatro does not allow adding another "
+                    .. "Joker unless it has Negative edition (which grants +1 slot). "
+                    .. "Either `skip` this pack, or first `sell` an owned joker (sell "
+                    .. "action while in shop — not available during pack opening), then "
+                    .. "retry. (%s is not Negative.)",
+                    owned, cap, name)}
+            end
+        elseif (set == "Tarot" or set == "Planet" or set == "Spectral") and not is_negative then
+            -- Same logic for consumables: pack-picked tarots/planets/
+            -- spectrals go INTO your consumable slots (unless the
+            -- model immediately uses them via `cards: [...]` targets,
+            -- but that only applies to target-acting tarots mid-pack).
+            -- If slots are full, the card can't be accepted.
+            local owned = (G.consumeables and G.consumeables.cards and #G.consumeables.cards) or 0
+            local cap = (G.consumeables and G.consumeables.config and G.consumeables.config.card_limit) or 2
+            if owned >= cap then
+                local name = (card.ability and card.ability.name) or "This consumable"
+                return {error = string.format(
+                    "Consumable slots are full (%d/%d). Either `skip` this pack, "
+                    .. "or USE or SELL one of your owned consumables first to free a "
+                    .. "slot. Negative-edition consumables would bypass this but %s is "
+                    .. "not Negative.",
+                    owned, cap, name)}
+            end
+        end
+
         local ok, err = safe_use_card(card)
         if not ok then
             return {error = "use_card (pack_select) failed: " .. tostring(err)}
