@@ -772,10 +772,47 @@ function State.extract_blinds()
         if not tag_key then return nil end
         local tag_def = G.P_TAGS and G.P_TAGS[tag_key] or nil
         if not tag_def then return { key = tag_key, name = tag_key, description = "" } end
+
+        -- Tag centers' loc_vars reads from a Tag INSTANCE's config
+        -- (Investment Tag wants `tag.config.dollars`, Orbital Tag wants
+        -- `tag.config.hand_type` and `tag.config.levels`, Economy Tag
+        -- wants `tag.config.dollars` for the cap, etc.). For
+        -- upcoming-skip-reward previews we don't have a live instance
+        -- yet, so we build one. Tag() is Balatro's canonical
+        -- constructor (Object:extend() __call metamethod) — it copies
+        -- the center's config into a fresh instance and fills in any
+        -- defaults loc_vars relies on. The `true` second arg signals
+        -- "preview mode" which populates chip/coin amounts for display.
+        local instance = nil
+        local ok, t = pcall(function()
+            if type(Tag) == "table" or type(Tag) == "function" then
+                return Tag(tag_key, true)
+            end
+            return nil
+        end)
+        if ok and type(t) == "table" then
+            instance = t
+        end
+
+        if not instance then
+            -- Fallback: hand-build a minimal tag-like table with just
+            -- the center's config copied. Enough for most simple
+            -- loc_vars implementations even when Balatro's Tag class
+            -- isn't hooked up yet (very early load).
+            instance = {
+                key = tag_key,
+                config = {},
+                ability = {set = "Tag", name = tag_def.name},
+            }
+            if type(tag_def.config) == "table" then
+                for k, v in pairs(tag_def.config) do instance.config[k] = v end
+            end
+        end
+
         return {
             key = tag_key,
             name = tag_def.name or tag_key,
-            description = State.render_description("Tag", tag_key, tag_def, nil),
+            description = State.render_description("Tag", tag_key, tag_def, instance),
         }
     end
     local skip_small = G.GAME.round_resets and G.GAME.round_resets.blind_tags
