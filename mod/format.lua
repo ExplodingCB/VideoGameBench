@@ -245,9 +245,9 @@ function Format.selecting_hand(state)
     -- observed a model claiming "3 spades" when the hand had 4,
     -- hallucinating a 7-of-Diamonds that wasn't present, etc.). Strong
     -- models will ignore this if they've already counted; weaker models
-    -- get an accurate ground-truth summary to reason against. Also
-    -- calls out "near" hands explicitly so the survey-for-flush rule
-    -- from the system prompt has something concrete to match on.
+    -- get an accurate ground-truth summary to reason against.
+    -- Deliberately NO "flush ready / straight reachable" hints — those
+    -- pre-solve the decision we're benchmarking. Raw counts only.
     if #state.hand > 0 then
         local suits = {Hearts = 0, Diamonds = 0, Clubs = 0, Spades = 0}
         local ranks = {}  -- rank_name -> count
@@ -298,41 +298,6 @@ function Format.selecting_hand(state)
             table.insert(lines, "  Paired ranks: (none)")
         end
 
-        -- Reachability hints — explicit callouts for Flush/Straight
-        -- potential. Uses the counts we just computed so we don't re-
-        -- scan the hand.
-        local hints = {}
-        for _, p in ipairs(suit_pairs) do
-            if p.count == 5 then
-                table.insert(hints, string.format("FLUSH READY in %s (play 5 cards, any index of suit)", p.name))
-            elseif p.count == 4 then
-                table.insert(hints, string.format("FLUSH REACHABLE in %s — 1 discard needed (discard non-%s cards, draw for 5th)", p.name, p.name))
-            elseif p.count == 3 and (state.discards_left or 0) >= 2 then
-                table.insert(hints, string.format("Flush possible in %s (3 of 5 — needs ~2 discards and luck)", p.name))
-            end
-        end
-        -- Straight detection: slide a 5-window over rank_order, count
-        -- how many distinct ranks in hand fall in each window.
-        local present = {}
-        for r in pairs(ranks) do
-            local o = rank_order[r]
-            if o then present[o] = true end
-        end
-        -- Include Ace-low option: if Ace is present, also mark rank 1
-        if present[14] then present[1] = true end
-        for lo = 1, 10 do
-            local hi = lo + 4
-            local cnt = 0
-            for v = lo, hi do if present[v] then cnt = cnt + 1 end end
-            if cnt == 5 then
-                table.insert(hints, string.format("STRAIGHT READY (ranks %d-%d in hand)", lo, hi))
-            elseif cnt == 4 then
-                table.insert(hints, string.format("STRAIGHT REACHABLE — 1 discard (4 of 5 ranks %d-%d present)", lo, hi))
-            end
-        end
-        if #hints > 0 then
-            table.insert(lines, "  Hints: " .. table.concat(hints, " ; "))
-        end
     end
     table.insert(lines, "")
 
