@@ -14,6 +14,7 @@ restart_balatro_and_wait_for_mod() between runs.
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import subprocess
 import time
@@ -25,6 +26,46 @@ DEFAULT_BALATRO_EXE = os.environ.get(
     "BALATRO_EXE",
     r"C:\Program Files (x86)\Steam\steamapps\common\Balatro\Balatro.exe",
 )
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MOD_SOURCE_DIR = os.path.join(REPO_ROOT, "mod")
+DEFAULT_MOD_TARGET_DIR = os.path.join(
+    os.environ.get("APPDATA", ""),
+    "Balatro",
+    "Mods",
+    "BalatroBench",
+)
+MOD_SYNC_FILES = (
+    "actions.lua",
+    "BalatroBench.lua",
+    "base_game_reference.lua",
+    "format.lua",
+    "lovely.toml",
+    "overlay.lua",
+    "server.lua",
+    "state.lua",
+)
+
+
+def sync_mod_files(
+    source_dir: str = MOD_SOURCE_DIR,
+    target_dir: str = DEFAULT_MOD_TARGET_DIR,
+) -> list[str]:
+    """Copy the repo's mod files into the live Balatro mod directory."""
+    if not source_dir or not os.path.isdir(source_dir):
+        return []
+    if not target_dir:
+        return []
+
+    os.makedirs(target_dir, exist_ok=True)
+    copied: list[str] = []
+    for filename in MOD_SYNC_FILES:
+        src = os.path.join(source_dir, filename)
+        if not os.path.isfile(src):
+            continue
+        dst = os.path.join(target_dir, filename)
+        shutil.copy2(src, dst)
+        copied.append(dst)
+    return copied
 
 
 def find_balatro_pids() -> list[int]:
@@ -153,6 +194,11 @@ def restart_balatro_and_wait_for_mod(
         if not kill_balatro(pids):
             return False, f"Failed to kill Balatro (PIDs={pids})"
 
+    try:
+        synced = sync_mod_files()
+    except OSError as exc:
+        return False, f"Failed to sync BalatroBench mod files: {exc}"
+
     pid = launch_balatro(exe_path)
     if pid is None:
         return False, "Failed to launch Balatro"
@@ -161,4 +207,4 @@ def restart_balatro_and_wait_for_mod(
     if not ready:
         return False, f"Mod didn't respond within {boot_timeout}s after launching Balatro"
 
-    return True, f"Balatro restarted (new PID {pid})"
+    return True, f"Balatro restarted (new PID {pid}; synced {len(synced)} mod files)"

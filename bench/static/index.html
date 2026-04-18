@@ -35,10 +35,13 @@
   }
 
   * { box-sizing: border-box; }
+  /* Fallback bg lives on <html> so <body> can stay transparent and let the
+     fixed z-index:-1 swirl canvas show through. */
+  html { background: var(--bg); }
   html, body { margin: 0; padding: 0; color: var(--text-dark);
     font-family: "m6x11plus", "Courier New", monospace;
     font-size: 18px; letter-spacing: 0.3px;
-    background: var(--bg);
+    background: transparent;
     /* Custom Balatro-ish crosshair cursor */
     cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20"><path d="M4 10 H16 M10 4 V16" stroke="%23f0e6c2" stroke-width="2.5" stroke-linecap="round"/><path d="M4 10 H16 M10 4 V16" stroke="%23374244" stroke-width="1" stroke-linecap="round"/></svg>') 10 10, crosshair;
   }
@@ -195,6 +198,298 @@
   .badge.failed, .badge.stopped { background: var(--balatro-red); color: #fffaf0; }
   .badge.queued { background: var(--balatro-gold); color: var(--panel-black); }
   .badge.idle { background: var(--panel-grey); color: var(--text-dark); }
+
+  /* Header toggle for fullscreen leaderboard mode. Lives next to the
+     status badge — same chunky-button treatment as the primary START
+     button but slimmer and gold-tinted to read as "view mode switcher"
+     rather than "run the benchmark". */
+  #global-status { display: flex; align-items: center; gap: 14px; }
+  .lb-toggle {
+    font-size: 14px !important; letter-spacing: 1.2px !important;
+    padding: 7px 16px !important; border-radius: 8px !important;
+    border-width: 2.5px !important;
+    background: var(--balatro-gold) !important; color: var(--panel-black) !important;
+  }
+  body.leaderboard-mode .lb-toggle {
+    background: var(--balatro-red) !important; color: #fffaf0 !important;
+  }
+  body.leaderboard-mode .lb-toggle::before { content: "← EXIT "; }
+  body:not(.leaderboard-mode) .lb-toggle::before { content: "▦ "; }
+
+  /* Fullscreen leaderboard stage. Hidden by default; activated by the
+     .leaderboard-mode class on <body>. Sits above everything on a
+     semi-transparent dark panel so the swirl canvas still shows
+     through the edges. */
+  #leaderboard-stage {
+    position: fixed; inset: 0; z-index: 50;
+    display: none;
+    flex-direction: column;
+    padding: 24px 32px 40px;
+    overflow-y: auto;
+    background:
+      radial-gradient(ellipse at top, rgba(20,32,39,0.55), rgba(20,32,39,0.85) 70%);
+    backdrop-filter: blur(1.5px);
+  }
+  body.leaderboard-mode #leaderboard-stage { display: flex; }
+  body.leaderboard-mode .wrap { display: none; }
+  /* In leaderboard mode the only thing we need from the header is the
+     toggle button itself. Hide the title + status badge and pin the
+     toggle to the top-right corner as a floating EXIT button so the
+     poster layout below has the full viewport to breathe. */
+  body.leaderboard-mode header h1,
+  body.leaderboard-mode #job-badge { display: none; }
+  body.leaderboard-mode header {
+    position: fixed; top: 0; right: 0; z-index: 60;
+    padding: 18px 24px; background: transparent;
+  }
+  body.leaderboard-mode #global-status { gap: 0; }
+
+  .lb-hero {
+    text-align: center;
+    margin: 8px auto 24px;
+    max-width: 1200px;
+  }
+  .lb-hero h2 {
+    margin: 0;
+    font-size: 48px; font-weight: normal;
+    color: var(--text-light);
+    text-shadow: 4px 4px 0 var(--panel-black), 0 0 24px rgba(0,0,0,0.7);
+    letter-spacing: 3px;
+  }
+  .lb-hero h2 .accent { color: var(--balatro-red); }
+  .lb-hero .lb-subtitle {
+    margin-top: 10px;
+    color: var(--panel-white);
+    font-size: 16px; letter-spacing: 1.2px;
+    text-shadow: 2px 2px 0 var(--panel-black);
+    opacity: 0.85;
+  }
+
+  /* Stat tiles across the top of the stage — total models, total runs,
+     best rating, total tokens. Same cream-card feel as the panels. */
+  .lb-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    max-width: 1400px;
+    margin: 0 auto 26px;
+    width: 100%;
+  }
+  .lb-stat {
+    background: var(--panel-grey);
+    border: 3px solid var(--panel-black);
+    border-radius: 12px;
+    padding: 5px;
+    box-shadow: var(--shadow);
+  }
+  .lb-stat-inner {
+    background: var(--panel-white);
+    border-radius: 8px;
+    padding: 14px 20px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .lb-stat-label {
+    font-size: 13px; letter-spacing: 1.2px;
+    color: var(--text-muted); text-transform: uppercase;
+  }
+  .lb-stat-value {
+    font-size: 36px; color: var(--panel-black);
+    line-height: 1;
+  }
+  .lb-stat-value .unit {
+    font-size: 16px; color: var(--text-muted); margin-left: 4px;
+  }
+
+  /* Poster-scale bar chart host — cream panel, chunky border, same
+     recipe as the other Balatro panels on the site. */
+  .lb-chart-wrap {
+    max-width: 1600px;
+    margin: 0 auto 26px;
+    width: 100%;
+    background: var(--panel-grey);
+    border: 3px solid var(--panel-black);
+    border-radius: 14px;
+    padding: 6px;
+    box-shadow: var(--shadow);
+  }
+  .lb-chart-inner {
+    background: var(--panel-white);
+    border-radius: 9px;
+    padding: 16px 18px;
+  }
+  #lb-chart-host {
+    height: 540px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  #lb-chart-host canvas { display: block; }
+
+  /* The big table itself. Pulled apart from #leaderboard-table on purpose
+     so tweaks here don't ripple into the small dashboard leaderboard. */
+  .lb-table-wrap {
+    max-width: 1600px;
+    margin: 0 auto;
+    width: 100%;
+    background: var(--panel-grey);
+    border: 3px solid var(--panel-black);
+    border-radius: 14px;
+    padding: 6px;
+    box-shadow: var(--shadow);
+  }
+  .lb-table-inner {
+    background: var(--panel-white);
+    border-radius: 9px;
+    padding: 8px 0;
+  }
+  .lb-table {
+    width: 100%;
+    border-collapse: collapse;
+    color: var(--panel-black);
+  }
+  .lb-table thead th {
+    text-align: left;
+    padding: 14px 12px;
+    font-size: 13px; font-weight: normal;
+    letter-spacing: 1.4px; text-transform: uppercase;
+    color: var(--text-muted);
+    border-bottom: 2px solid var(--panel-grey);
+    background: transparent;
+    white-space: nowrap;
+  }
+  .lb-table thead th:first-child { padding-left: 24px; }
+  .lb-table thead th:last-child  { padding-right: 24px; }
+  .lb-table tbody td {
+    padding: 16px 12px;
+    border-bottom: 1px dashed rgba(55,66,68,0.18);
+    vertical-align: middle;
+    font-size: 16px;
+  }
+  .lb-table tbody td:first-child { padding-left: 24px; }
+  .lb-table tbody td:last-child  { padding-right: 24px; }
+  .lb-table tbody tr:last-child td { border-bottom: none; }
+  .lb-table tbody tr:hover td { background: rgba(254,95,85,0.06); }
+
+  /* Big rank medal. Top 3 get themed colors; everyone else is a grey pill. */
+  .lb-rank {
+    display: inline-flex;
+    align-items: center; justify-content: center;
+    width: 42px; height: 42px; border-radius: 10px;
+    border: 2.5px solid var(--panel-black);
+    background: var(--panel-grey); color: var(--panel-black);
+    font-size: 20px; font-weight: bold;
+    box-shadow: 0 3px 0 var(--panel-black);
+    letter-spacing: 0;
+  }
+  .lb-rank.r1 { background: var(--balatro-gold);   color: var(--panel-black); }
+  .lb-rank.r2 { background: #d7dde5;               color: var(--panel-black); }
+  .lb-rank.r3 { background: #c17a3a;               color: #fffaf0; }
+
+  .lb-model-cell {
+    display: flex; align-items: center; gap: 12px;
+    min-width: 260px;
+  }
+  .lb-model-swatch {
+    width: 10px; height: 44px; border-radius: 3px;
+    border: 1.5px solid var(--panel-black);
+    flex: 0 0 10px;
+  }
+  .lb-model-name {
+    font-size: 18px; color: var(--panel-black);
+    line-height: 1.15;
+  }
+  .lb-model-sub {
+    font-size: 12px; color: var(--text-muted);
+    letter-spacing: 1px; text-transform: uppercase;
+    margin-top: 3px;
+  }
+
+  /* Rating cell: big number + horizontal progress bar representing
+     rating / 100. Mirrors the feel of Artificial Analysis's "Intelligence
+     Index" rails but in our Balatro palette. */
+  .lb-rating-cell { min-width: 220px; }
+  .lb-rating-head {
+    display: flex; align-items: baseline; gap: 10px;
+    margin-bottom: 6px;
+  }
+  .lb-rating-num {
+    font-size: 28px; font-weight: bold;
+    color: var(--panel-black);
+    line-height: 1;
+  }
+  .lb-rating-best {
+    font-size: 12px; color: var(--text-muted);
+    letter-spacing: 0.8px;
+  }
+  .lb-bar {
+    height: 8px; border-radius: 4px;
+    background: rgba(55,66,68,0.12);
+    overflow: hidden;
+    position: relative;
+  }
+  .lb-bar > span {
+    display: block; height: 100%;
+    border-radius: 4px;
+    background: var(--balatro-red);
+  }
+
+  .lb-winrate { display: flex; flex-direction: column; gap: 4px; min-width: 100px; }
+  .lb-winrate-num {
+    font-size: 16px; color: var(--panel-black);
+  }
+  .lb-winrate-sub {
+    font-size: 12px; color: var(--text-muted);
+  }
+
+  .lb-ante-chips {
+    display: inline-flex; gap: 3px; vertical-align: middle;
+    margin-left: 6px;
+  }
+  .lb-ante-chip {
+    width: 8px; height: 14px; border-radius: 2px;
+    background: rgba(55,66,68,0.18);
+    border: 1px solid rgba(55,66,68,0.35);
+  }
+  .lb-ante-chip.on { background: var(--balatro-green); border-color: var(--panel-black); }
+
+  .lb-spark {
+    background: rgba(55,66,68,0.06);
+    border-radius: 6px;
+    padding: 4px 6px;
+    display: inline-block;
+    vertical-align: middle;
+  }
+
+  /* Provider pill under model name. Muted so the model name stays the
+     hero; we still want to know "which endpoint is this" at a glance. */
+  .lb-provider-pill {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 6px;
+    border: 1.5px solid var(--panel-black);
+    background: var(--panel-grey);
+    color: var(--panel-black);
+    font-size: 11px; letter-spacing: 0.8px; text-transform: uppercase;
+    margin-right: 6px;
+  }
+
+  .lb-empty {
+    max-width: 700px; margin: 60px auto;
+    text-align: center;
+    background: var(--panel-white);
+    border: 3px solid var(--panel-black);
+    border-radius: 12px;
+    padding: 40px;
+    color: var(--panel-black);
+  }
+
+  /* Responsive: compress stats/columns on narrower screens. Full detail
+     is the goal, but if someone has the panel open at 1100px we still
+     want it readable rather than horizontally scrolling. */
+  @media (max-width: 1200px) {
+    .lb-stats { grid-template-columns: repeat(2, 1fr); }
+    .lb-hero h2 { font-size: 36px; }
+    .lb-table thead th, .lb-table tbody td { padding: 12px 8px; }
+  }
 
   #status-line { font-size: 15px; color: var(--text-muted); margin-top: 14px; }
   #status-line b { color: var(--panel-black); }
@@ -411,8 +706,51 @@
 <canvas id="balatro-bg"></canvas>
 <header>
   <h1>Balatro<span>Bench</span> <span class="tag">AI Benchmark Dashboard</span></h1>
-  <div id="global-status"><span class="badge idle" id="job-badge">idle</span></div>
+  <div id="global-status">
+    <button id="leaderboard-toggle" class="lb-toggle" title="Toggle fullscreen leaderboard (Esc to exit)">LEADERBOARD</button>
+    <span class="badge idle" id="job-badge">idle</span>
+  </div>
 </header>
+
+<!-- Fullscreen leaderboard stage. Rendered by renderFullLeaderboard() from
+     the same /api/leaderboard data that powers the dashboard's small
+     leaderboard panel, but laid out at poster-scale with stat tiles,
+     medal ranks, rating bars, ante chips, and per-model sparklines. -->
+<div id="leaderboard-stage" aria-hidden="true">
+  <div class="lb-hero">
+    <h2>Balatro<span class="accent">Bench</span> Leaderboard</h2>
+    <div class="lb-subtitle">BalatroBench Rating · 0-100 · rounds 55% · tokens 30% · chips 15%</div>
+  </div>
+  <div class="lb-stats" id="lb-stats"></div>
+  <!-- Poster-scale bar chart: same builder as the dashboard's small
+       leaderboard chart, sized up with bigger bars, pill labels, and
+       axis fonts for the fullscreen view. Horizontal scroll kicks in
+       if more models are stacked than fit the viewport. -->
+  <div class="lb-chart-wrap">
+    <div class="lb-chart-inner">
+      <div id="lb-chart-host"><canvas id="lb-chart"></canvas></div>
+    </div>
+  </div>
+  <div class="lb-table-wrap">
+    <div class="lb-table-inner">
+      <table class="lb-table" id="lb-table">
+        <thead><tr>
+          <th style="width:60px">Rank</th>
+          <th>Model</th>
+          <th>Rating</th>
+          <th>Range</th>
+          <th>Win Rate</th>
+          <th>Avg Ante</th>
+          <th>Avg Score</th>
+          <th>Tokens / Run</th>
+          <th>Runs</th>
+          <th>Trend</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</div>
 
 <div class="wrap">
   <div class="panel">
@@ -430,6 +768,8 @@
           <option value="google">Google Gemini (direct)</option>
           <option value="inception">Inception Labs (direct)</option>
           <option value="cerebras">Cerebras (direct)</option>
+          <option value="opencode">OpenCode (free · local server)</option>
+          <option value="codex">Codex (ChatGPT subscription · local CLI)</option>
         </select>
       </div>
       <div class="col">
@@ -623,6 +963,8 @@ const PROVIDER_LABELS = {
   google: "Google Gemini direct",
   inception: "Inception Labs direct",
   cerebras: "Cerebras direct",
+  opencode: "OpenCode local gateway (free)",
+  codex: "Codex CLI (ChatGPT subscription)",
 };
 
 // Resolve which provider the user currently has selected. Small helper
@@ -680,6 +1022,8 @@ const PROVIDER_KEY_HINTS = {
   google:     "Get one at https://aistudio.google.com/apikey · env: GOOGLE_API_KEY",
   inception:  "Get one at https://platform.inceptionlabs.ai · env: INCEPTION_API_KEY",
   cerebras:   "Get one at https://cloud.cerebras.ai · env: CEREBRAS_API_KEY",
+  opencode:   "No key needed — bench spawns `opencode serve` locally and routes to the free gateway.",
+  codex:      "No key needed — bench shells out to `codex exec` using your `codex login` (ChatGPT subscription).",
 };
 
 // Sync the API-key input + label + hint to the currently-selected
@@ -691,9 +1035,17 @@ function refreshApiKeyField() {
     openrouter: "OpenRouter", openai: "OpenAI",
     anthropic: "Anthropic",   google: "Google",
     inception: "Inception",   cerebras: "Cerebras",
+    opencode: "OpenCode",     codex: "Codex",
   }[provider] || provider;
   $("#api-key-label").textContent = `API Key (${friendly})`;
   $("#api-key-hint").textContent = PROVIDER_KEY_HINTS[provider] || "";
+  // OpenCode and Codex are CLI-driven and handle their own auth — hide
+  // the API key input so users don't think they need to fill anything in.
+  const noKey = provider === "opencode" || provider === "codex";
+  $("#api-key").style.display = noKey ? "none" : "";
+  if (noKey) {
+    $("#api-key-label").textContent = `${friendly} (no key)`;
+  }
   const s = _settingsCache || {};
   const val = s[_keyFieldFor(provider)]
            || (provider === "openrouter" ? (s.api_key || "") : "");
@@ -1319,6 +1671,7 @@ document.addEventListener("change", (e) => {
 // scroll down to see the impact on rankings.
 
 let _leaderboardChart = null;
+let _leaderboardChartFull = null;
 
 // Stable color palette for models. Same model gets same color across
 // renders and page reloads by hashing the model name. These are the
@@ -1415,39 +1768,47 @@ async function loadLeaderboard() {
   });
 
   // ---- range bar chart ----
-  // One horizontal bar per model, spanning [min_rating, max_rating] across
-  // all of that model's runs. A model with a single run renders as a
-  // zero-width line at its single rating; multi-run models show their
-  // spread so you can see consistency vs variance at a glance.
-  //
-  // Chart.js encodes "floating bar" ranges by passing [from, to] tuples
-  // in the dataset.data array. A point-marker dataset on top shows the
-  // average rating within the range so the viewer gets "best case",
-  // "worst case", and "typical" in one glance.
+  // Shared with the fullscreen leaderboard view; see _buildLeaderboardChart
+  // below for the Chart.js config. The dashboard uses compact defaults.
+  const canvas = document.getElementById("leaderboard-chart");
+  const host = document.getElementById("leaderboard-chart-host");
+  if (_leaderboardChart) _leaderboardChart.destroy();
+  _leaderboardChart = _buildLeaderboardChart(canvas, host, models, {
+    barPixelWidth: 64,
+    height: 400,
+    hostHeight: 420,
+    titleText: "BalatroBench Rating",
+  });
+
+  // The fullscreen leaderboard reads the same /api/leaderboard shape the
+  // dashboard panel just consumed. Re-render it with the fresh snapshot
+  // so a run finishing while you're in leaderboard mode updates live.
+  renderFullLeaderboard(data);
+}
+
+// Shared Chart.js bar-chart builder used by both the dashboard's small
+// leaderboard panel and the fullscreen leaderboard stage. Returns the
+// created Chart instance so callers can destroy()/swap it on refresh.
+//
+// Artificial-Analysis-style vertical ranking chart: one bar per model,
+// descending, pill value label on each bar, I-beam whiskers for the
+// min/max rating across a model's runs. Custom plugins handle both
+// extras inline so we don't pull chartjs-plugin-datalabels/error-bars.
+function _buildLeaderboardChart(canvas, host, models, opts) {
+  opts = opts || {};
+  const BAR_PIXEL_WIDTH   = opts.barPixelWidth || 64;
+  const CHART_HEIGHT      = opts.height         || 400;
+  const HOST_HEIGHT       = opts.hostHeight     || CHART_HEIGHT + 20;
+  const PILL_FONT_SIZE    = opts.pillFontSize   || 15;
+  const AXIS_FONT_SIZE    = opts.axisFontSize   || 12;
+  const TITLE_TEXT        = opts.titleText      || "BalatroBench Rating";
+
   const labels = models.map(m => m.model);
   const ranges = models.map(m => {
     const rs = (m.ratings && m.ratings.length) ? m.ratings : [m.rating];
     return [Math.min(...rs), Math.max(...rs)];
   });
   const colors = models.map(m => _modelColor(m.model));
-  const canvas = document.getElementById("leaderboard-chart");
-
-  // Vertical ranking chart in the spirit of the Artificial Analysis
-  // Intelligence Index: one bar per model, descending, bold numeric
-  // label ON each bar, min/max shown as whiskers for models with more
-  // than one run.
-  //
-  // Two custom Chart.js plugins handle the extras (Chart.js core only
-  // gives us a plain bar; we don't want the chartjs-plugin-datalabels or
-  // chartjs-plugin-error-bars dependencies for something this small):
-  //   - `valueLabels`: draws the numeric rating at the top of each bar
-  //   - `errorBars`:   draws I-beam whiskers spanning [min, max] on top
-  //                    of each bar for multi-run models
-  //
-  // Bars are sized to a fixed pixel width so the chart stretches
-  // horizontally (with scroll) rather than squishing when more models
-  // are added. Rankings are most legible when names don't overlap.
-  const BAR_PIXEL_WIDTH = 64;
   const avgs = models.map(m => m.rating);
   // All ink lives in the Balatro-themed CSS custom-property palette —
   // pull the actual values at runtime so theming tweaks flow through
@@ -1466,13 +1827,12 @@ async function loadLeaderboard() {
   // attributes for the draw buffer, CSS for layout size. The host's
   // overflow-x:auto lets the chart scroll horizontally when it outgrows
   // the viewport.
-  const host = document.getElementById("leaderboard-chart-host");
   const hostWidth = Math.max(host.clientWidth, models.length * BAR_PIXEL_WIDTH + 140);
   canvas.width = hostWidth;
-  canvas.height = 400;
+  canvas.height = CHART_HEIGHT;
   canvas.style.width = hostWidth + "px";
-  canvas.style.height = "400px";
-  host.style.height = "420px"; // reset from any prior run
+  canvas.style.height = CHART_HEIGHT + "px";
+  host.style.height = HOST_HEIGHT + "px"; // reset from any prior run
 
   // Plugin: value labels on top of each bar. Styled like Balatro's score
   // chips — dark text, cream pill background with a chunky outline.
@@ -1484,7 +1844,7 @@ async function loadLeaderboard() {
       const { ctx } = chart;
       const meta = chart.getDatasetMeta(0);
       ctx.save();
-      ctx.font = `bold 15px ${balatroFont}`;
+      ctx.font = `bold ${PILL_FONT_SIZE}px ${balatroFont}`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       const baseY = chart.scales.y.getPixelForValue(0);
@@ -1573,8 +1933,7 @@ async function loadLeaderboard() {
   }
 
   const ctx = canvas.getContext("2d");
-  if (_leaderboardChart) _leaderboardChart.destroy();
-  _leaderboardChart = new Chart(ctx, {
+  return new Chart(ctx, {
     type: "bar",
     data: {
       labels,
@@ -1634,7 +1993,7 @@ async function loadLeaderboard() {
           border: { color: panelBlack, width: 2 },
           ticks: {
             color: textDark,
-            font: { size: 12, family: balatroFont },
+            font: { size: AXIS_FONT_SIZE, family: balatroFont },
             maxRotation: 55,
             minRotation: 45,
             autoSkip: false,
@@ -1655,20 +2014,239 @@ async function loadLeaderboard() {
           border: { color: panelBlack, width: 2 },
           ticks: {
             color: textMuted,
-            font: { size: 12, family: balatroFont },
+            font: { size: AXIS_FONT_SIZE, family: balatroFont },
             stepSize: 20,
           },
           title: {
             display: true,
-            text: "BalatroBench Rating",
+            text: TITLE_TEXT,
             color: textMuted,
-            font: { size: 13, family: balatroFont },
+            font: { size: AXIS_FONT_SIZE + 1, family: balatroFont },
           },
         },
       },
     },
   });
 }
+
+// ---------------------------------------------------------------------------
+// Fullscreen "Leaderboard mode" — poster-scale ranking view
+// ---------------------------------------------------------------------------
+// Activated by the header toggle. Reads the same payload as the small
+// dashboard leaderboard; we just lay it out at full-page scale with
+// stat tiles, medal ranks, rating progress bars, ante chips, and a
+// per-model SVG sparkline of the model's rating history.
+
+// Tiny SVG sparkline — one polyline over the model's rating history.
+// Kept as inline SVG (rather than another Chart.js chart per row) so the
+// page stays responsive even with 20+ models. Single-run models render
+// as a centered dot, multi-run models as a crisp 2px line.
+function _lbSparkline(ratings, w, h, color) {
+  w = w || 120; h = h || 34;
+  color = color || "#374244";
+  if (!ratings || !ratings.length) return "";
+  if (ratings.length === 1) {
+    return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="display:block">
+      <circle cx="${w/2}" cy="${h/2}" r="3.5" fill="${color}"/>
+    </svg>`;
+  }
+  // Pad so the line doesn't kiss the edges. Clamp range so a dead-flat
+  // series doesn't divide by zero and still renders as a centered line.
+  const pad = 4;
+  const min = Math.min(...ratings);
+  const max = Math.max(...ratings);
+  const range = Math.max(max - min, 1);
+  const pts = ratings.map((r, i) => {
+    const x = pad + (i / (ratings.length - 1)) * (w - pad * 2);
+    const y = pad + (1 - (r - min) / range) * (h - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  // Area fill under the line for that "mini stock chart" feel.
+  const first = pts.split(" ")[0].split(",");
+  const last  = pts.split(" ").slice(-1)[0].split(",");
+  const area = `${first[0]},${h - pad} ${pts} ${last[0]},${h - pad}`;
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="display:block">
+    <polygon points="${area}" fill="${color}" fill-opacity="0.15"/>
+    <polyline points="${pts}" fill="none" stroke="${color}"
+              stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+  </svg>`;
+}
+
+// Ante progress: 8 tiny chips, one per ante, lit up to `val` (fractional).
+function _lbAnteChips(val) {
+  const filled = Math.max(0, Math.min(8, Math.round(val)));
+  let out = "";
+  for (let i = 1; i <= 8; i++) {
+    out += `<span class="lb-ante-chip${i <= filled ? ' on' : ''}"></span>`;
+  }
+  return `<span class="lb-ante-chips" aria-hidden="true">${out}</span>`;
+}
+
+function renderFullLeaderboard(data) {
+  const stage = document.getElementById("leaderboard-stage");
+  if (!stage) return;
+  const statsHost = document.getElementById("lb-stats");
+  const tbody = document.querySelector("#lb-table tbody");
+  const chartCanvas = document.getElementById("lb-chart");
+  const chartHost = document.getElementById("lb-chart-host");
+  if (!statsHost || !tbody || !chartCanvas || !chartHost) return;
+
+  const models = (data && data.models) || [];
+
+  // Empty state: one big cream card centered inside the stage. We leave
+  // the stat tiles blank here rather than showing zeros, which would
+  // imply the leaderboard is "full of zeros" instead of not-yet-populated.
+  if (!models.length) {
+    statsHost.innerHTML = "";
+    if (_leaderboardChartFull) { _leaderboardChartFull.destroy(); _leaderboardChartFull = null; }
+    tbody.innerHTML = `<tr><td colspan="10">
+      <div class="lb-empty">
+        <div style="font-size:22px;margin-bottom:10px">No runs yet</div>
+        <div style="color:var(--text-muted);font-size:15px;line-height:1.5">
+          Finish a run to populate the leaderboard.<br>
+          Exit leaderboard mode and hit <b>START</b> to queue a batch.
+        </div>
+      </div>
+    </td></tr>`;
+    return;
+  }
+
+  // ---- big bar chart ----
+  if (_leaderboardChartFull) _leaderboardChartFull.destroy();
+  _leaderboardChartFull = _buildLeaderboardChart(chartCanvas, chartHost, models, {
+    barPixelWidth: 96,
+    height: 520,
+    hostHeight: 540,
+    pillFontSize: 18,
+    axisFontSize: 14,
+    titleText: "BalatroBench Rating",
+  });
+
+  // ---- stat tiles ----
+  const totalModels = models.length;
+  const totalRuns = models.reduce((s, m) => s + (m.total_runs || 0), 0);
+  const totalTokens = models.reduce((s, m) => s + (m.total_tokens || 0), 0);
+  const topRating = Math.max(...models.map(m => m.rating || 0));
+  const topModel = models[0] ? models[0].model : "—";
+  const tiles = [
+    { label: "Models ranked",  value: totalModels },
+    { label: "Total runs",     value: totalRuns },
+    { label: "Top rating",     value: topRating.toFixed(1), sub: topModel },
+    { label: "Tokens spent",   value: totalTokens >= 1e6
+        ? (totalTokens / 1e6).toFixed(1) + "M"
+        : totalTokens >= 1e3
+          ? (totalTokens / 1e3).toFixed(1) + "K"
+          : String(totalTokens) },
+  ];
+  statsHost.innerHTML = tiles.map(t => `
+    <div class="lb-stat"><div class="lb-stat-inner">
+      <div class="lb-stat-label">${t.label}</div>
+      <div class="lb-stat-value">${t.value}</div>
+      ${t.sub ? `<div style="font-size:12px;color:var(--text-muted);
+                             white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                   ${t.sub}
+                 </div>` : ""}
+    </div></div>
+  `).join("");
+
+  // ---- rows ----
+  // The rating bar is normalized to the top model's rating rather than
+  // the theoretical 100 so small differences between competitive models
+  // read visually — matches how Artificial Analysis does it.
+  const maxRating = Math.max(topRating, 1);
+  tbody.innerHTML = "";
+  models.forEach((m, i) => {
+    const color = _modelColor(m.model);
+    const avgTokens = m.total_tokens && m.total_runs
+      ? Math.round(m.total_tokens / m.total_runs)
+      : 0;
+    const ratings = (m.ratings && m.ratings.length) ? m.ratings : [m.rating];
+    const rMin = Math.min(...ratings);
+    const rMax = Math.max(...ratings);
+    const rangeStr = (rMax - rMin) < 0.1
+      ? `<span style="color:var(--text-muted)">—</span>`
+      : `<span style="color:var(--text-muted)">${rMin.toFixed(1)}</span>
+         <span style="color:var(--text-muted);margin:0 4px">–</span>
+         <span>${rMax.toFixed(1)}</span>`;
+    const winPct = Math.round((m.win_rate || 0) * 100);
+    const provider = m.provider ? `<span class="lb-provider-pill">${m.provider}</span>` : "";
+    const infraWarn = m.infra_failed_runs
+      ? `<span style="color:var(--balatro-red);font-size:11px;margin-left:8px"
+               title="Infra-failed runs excluded from aggregates">
+           ⚠ ${m.infra_failed_runs} infra-failed
+         </span>`
+      : "";
+    const rankClass = i < 3 ? `r${i+1}` : "";
+    const barPct = Math.max(2, (m.rating / maxRating) * 100);
+
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><span class="lb-rank ${rankClass}">${i + 1}</span></td>
+      <td>
+        <div class="lb-model-cell">
+          <span class="lb-model-swatch" style="background:${color}"></span>
+          <div>
+            <div class="lb-model-name">${m.model}</div>
+            <div class="lb-model-sub">${provider}${infraWarn}</div>
+          </div>
+        </div>
+      </td>
+      <td class="lb-rating-cell">
+        <div class="lb-rating-head">
+          <span class="lb-rating-num">${m.rating.toFixed(1)}</span>
+          <span class="lb-rating-best">best ${m.rating_best.toFixed(1)}</span>
+        </div>
+        <div class="lb-bar"><span style="width:${barPct}%;background:${color}"></span></div>
+      </td>
+      <td>${rangeStr}</td>
+      <td>
+        <div class="lb-winrate">
+          <div class="lb-winrate-num">${winPct}%</div>
+          <div class="lb-winrate-sub">${m.wins}/${m.total_runs} wins</div>
+        </div>
+      </td>
+      <td>
+        <span style="font-size:16px">${m.avg_ante}</span>
+        <span style="color:var(--text-muted);font-size:13px">/8</span>
+        ${_lbAnteChips(m.avg_ante)}
+      </td>
+      <td>${fmt(m.avg_highest_score)}</td>
+      <td>${fmt(avgTokens)}</td>
+      <td>${m.total_runs}</td>
+      <td><span class="lb-spark">${_lbSparkline(ratings, 120, 34, color)}</span></td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+// Toggle wiring. Two entry points: the header button and Esc when the
+// stage is open. On open we also pull a fresh /api/leaderboard so the
+// user never lands on stale data when flipping into the view.
+(function(){
+  const btn = document.getElementById("leaderboard-toggle");
+  if (!btn) return;
+  async function setMode(on) {
+    document.body.classList.toggle("leaderboard-mode", !!on);
+    const stage = document.getElementById("leaderboard-stage");
+    if (stage) stage.setAttribute("aria-hidden", on ? "false" : "true");
+    if (on) {
+      // Always refresh on open — cheap call, and leaderboard data might
+      // have moved since the dashboard's last periodic refresh.
+      try { await loadLeaderboard(); } catch (e) { /* loadLeaderboard already surfaces errors */ }
+      window.scrollTo({ top: 0, behavior: "instant" });
+    }
+  }
+  btn.addEventListener("click", () => {
+    setMode(!document.body.classList.contains("leaderboard-mode"));
+  });
+  // Esc exits — standard modal ergonomics; don't swallow the event when
+  // we're not in leaderboard mode so the rest of the page keeps working.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && document.body.classList.contains("leaderboard-mode")) {
+      setMode(false);
+    }
+  });
+})();
 
 // ---------------------------------------------------------------------------
 // Wire up start/stop + periodic polling
@@ -1873,16 +2451,50 @@ $("#api-key").addEventListener("blur", saveCurrentApiKey);
   const u_contrast    = gl.getUniformLocation(prog, "iContrast");
   const u_spin_amount = gl.getUniformLocation(prog, "iSpinAmount");
 
-  // Balatro's menu-ish palette: deep blue + teal + cream, the classic feel.
-  gl.uniform4f(u_c1, 0.09, 0.22, 0.35, 1.0); // deep blue-teal
-  gl.uniform4f(u_c2, 0.24, 0.68, 0.70, 1.0); // brighter teal
-  gl.uniform4f(u_c3, 0.96, 0.91, 0.70, 1.0); // cream highlights
   gl.uniform1f(u_contrast, 3.5);
   gl.uniform1f(u_spin_amount, 0.25);
+
+  // Palettes the swirl cycles through — loosely inspired by Balatro's
+  // menu/run backgrounds. Each entry is [c1 (deep), c2 (mid), c3 (highlight)].
+  // We crossfade between adjacent palettes on a slow timer.
+  const palettes = [
+    // Classic menu: deep blue + teal + cream
+    [[0.09, 0.22, 0.35], [0.24, 0.68, 0.70], [0.96, 0.91, 0.70]],
+    // Red Deck: crimson + coral + cream
+    [[0.28, 0.06, 0.10], [0.78, 0.20, 0.22], [0.98, 0.88, 0.72]],
+    // Purple/arcana: indigo + violet + pale gold
+    [[0.14, 0.08, 0.30], [0.50, 0.25, 0.72], [0.96, 0.85, 0.60]],
+    // Forest: deep green + jade + cream
+    [[0.06, 0.22, 0.18], [0.22, 0.62, 0.46], [0.95, 0.92, 0.70]],
+    // Sunset: dark plum + orange + pale yellow
+    [[0.22, 0.08, 0.22], [0.88, 0.42, 0.18], [0.98, 0.90, 0.60]],
+  ];
+  const PALETTE_SECONDS = 14; // time spent fully on one palette + crossfade
+
+  function lerp(a, b, t){ return a + (b - a) * t; }
+  function mixColor(a, b, t){
+    return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
+  }
+  // Smoothstep so transitions ease in/out instead of being linear.
+  function smooth(t){ return t * t * (3 - 2 * t); }
 
   const t0 = performance.now();
   function frame(){
     const t = (performance.now() - t0) / 1000;
+
+    const phase = t / PALETTE_SECONDS;
+    const i  = Math.floor(phase) % palettes.length;
+    const j  = (i + 1) % palettes.length;
+    const f  = smooth(phase - Math.floor(phase));
+    const a  = palettes[i];
+    const b  = palettes[j];
+    const c1 = mixColor(a[0], b[0], f);
+    const c2 = mixColor(a[1], b[1], f);
+    const c3 = mixColor(a[2], b[2], f);
+    gl.uniform4f(u_c1, c1[0], c1[1], c1[2], 1.0);
+    gl.uniform4f(u_c2, c2[0], c2[1], c2[2], 1.0);
+    gl.uniform4f(u_c3, c3[0], c3[1], c3[2], 1.0);
+
     gl.uniform2f(u_res, canvas.width, canvas.height);
     gl.uniform1f(u_time, t);
     gl.uniform1f(u_spin, t);

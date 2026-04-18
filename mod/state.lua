@@ -53,6 +53,131 @@ local SUIT_SYMBOLS = {
     Spades = "Spades",
 }
 
+-- Load base-game reference catalog (deterministic fallback for numbered items)
+local base_game_ref = nil
+local function _load_base_game_ref()
+    if base_game_ref then return base_game_ref end
+    local ok, ref = pcall(function()
+        return require("balatrobench_base_game_ref")
+    end)
+    if ok and type(ref) == "table" then
+        base_game_ref = ref
+        return ref
+    end
+    return nil
+end
+
+---------------------------------------------------------------------------
+-- Base game reference lookup and token resolution
+---------------------------------------------------------------------------
+
+local function _resolve_token(token_name, loc_ref, card)
+    -- Resolve placeholder tokens like {t_mult}, {type}, {suit}, etc.
+    -- from card.config, card.ability, loc_ref.config, etc.
+
+    if not token_name or token_name == "" then return nil end
+
+    -- Check card.config first (primary location for most abilities)
+    if card and type(card.config) == "table" then
+        if card.config[token_name] ~= nil then return card.config[token_name] end
+        if type(card.config.extra) == "table" and card.config.extra[token_name] ~= nil then
+            return card.config.extra[token_name]
+        end
+    end
+
+    -- Check card.ability (for instance-specific state)
+    if card and type(card.ability) == "table" then
+        if card.ability[token_name] ~= nil then return card.ability[token_name] end
+        if type(card.ability.extra) == "table" and card.ability.extra[token_name] ~= nil then
+            return card.ability.extra[token_name]
+        end
+    end
+
+    -- Check loc_ref.config (center definition)
+    if loc_ref and type(loc_ref.config) == "table" then
+        if loc_ref.config[token_name] ~= nil then return loc_ref.config[token_name] end
+        if type(loc_ref.config.extra) == "table" and loc_ref.config.extra[token_name] ~= nil then
+            return loc_ref.config.extra[token_name]
+        end
+    end
+
+    -- For planet cards, resolve hand_type as the hand name
+    if token_name == "hand_type" and loc_ref and loc_ref.config and loc_ref.config.hand_type then
+        return loc_ref.config.hand_type
+    end
+
+    -- For tags with special lookups (orbital, etc.)
+    if card and type(card.config) == "table" then
+        if token_name == "orbital_hand" then return card.config.hand_type end
+        if token_name == "levels" then return card.config.levels end
+    end
+
+    return nil
+end
+
+local function _render_from_catalog(set, key, loc_ref, card)
+    -- Render using the base-game reference catalog.
+    -- Returns nil if entry not found or if catalog can't be loaded.
+    local ref = _load_base_game_ref()
+    if not ref or not ref.by_key then return nil end
+
+    local entry = ref.by_key[key]
+    if not entry or entry.set ~= set then return nil end
+
+    -- Handle static text entries
+    if entry.text then
+        return entry.text
+    end
+
+    -- Handle template entries with token substitution
+    if entry.template and entry.tokens then
+        local result = entry.template
+        for _, token in ipairs(entry.tokens) do
+            local value = _resolve_token(token, loc_ref, card)
+            if value ~= nil then
+                value = tostring(value)
+                result = result:gsub("{" .. token .. "}", value)
+            end
+        end
+
+        -- Remove any unreplaced tokens (shouldn't happen for base game)
+        result = result:gsub("{[%w_]+}", "?")
+        return result
+    end
+
+    -- Handle special computed cases
+    if entry.kind == "planet_level_up" then
+        -- hand_type from loc_ref.config takes precedence; fall back to
+        -- the hint stored in the catalog entry itself.
+        local hand_type = (loc_ref and loc_ref.config and loc_ref.config.hand_type)
+                          or entry.hand_type
+        if hand_type then
+            local hand = G and G.GAME and G.GAME.hands and G.GAME.hands[hand_type]
+            local level = (hand and hand.level) or 1
+            local scale_mult = (hand and hand.l_mult) or loc_ref.mult or loc_ref.l_mult
+            local scale_chips = (hand and hand.l_chips) or loc_ref.chips or loc_ref.l_chips
+            local mult_part = scale_mult and ("+" .. tostring(scale_mult) .. " Mult") or ""
+            local chips_part = scale_chips and ("+" .. tostring(scale_chips) .. " Chips") or ""
+            local joiner = (mult_part ~= "" and chips_part ~= "") and " and " or ""
+            return string.format(
+                "(Lvl %d) Levels up %s: %s%s%s per use",
+                level, hand_type, mult_part, joiner, chips_part
+            )
+        end
+    end
+
+    if entry.kind == "tag_orbital_levelup" and card then
+        -- Orbital tag: "Upgrade {hand_type} by {levels} levels"
+        local hand_type = card.config and card.config.hand_type
+        local levels = card.config and card.config.levels
+        if hand_type and levels and not tostring(hand_type):find("^%[") then
+            return string.format("Upgrade %s by %s levels", tostring(hand_type), tostring(levels))
+        end
+    end
+
+    return nil
+end
+
 ---------------------------------------------------------------------------
 -- Effect text rendering
 ---------------------------------------------------------------------------
@@ -258,38 +383,257 @@ local function _render_planet_fallback(loc_ref)
     )
 end
 
+local function _clean_description(s)
+    if not s or s == "" then return nil end
+    s = strip_markup(s)
+    s = s:gsub("[\n\t]", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+    if s == "" then return nil end
+    return s
+end
+
+local function _count_placeholders(s)
+    local cleaned = _clean_description(s)
+    if not cleaned then return math.huge end
+    local n = 0
+    for _ in cleaned:gmatch("%?") do
+        n = n + 1
+    end
+    return n
+end
+
+local function _pick_better_description(best, candidate)
+    local normalized_best = _clean_description(best)
+    local normalized_candidate = _clean_description(candidate)
+    if not normalized_candidate then return normalized_best end
+    if not normalized_best then return normalized_candidate end
+
+    local best_placeholders = _count_placeholders(normalized_best)
+    local candidate_placeholders = _count_placeholders(normalized_candidate)
+    if candidate_placeholders < best_placeholders then
+        return normalized_candidate
+    end
+    if candidate_placeholders > best_placeholders then
+        return normalized_best
+    end
+    if best_placeholders > 0 and #normalized_candidate > #normalized_best then
+        return normalized_candidate
+    end
+    return normalized_best
+end
+
+local function _lookup_structured_value(loc_ref, card, name)
+    if loc_ref and type(loc_ref.config) == "table" and loc_ref.config[name] ~= nil then
+        return loc_ref.config[name]
+    end
+    if loc_ref and type(loc_ref.config) == "table"
+            and type(loc_ref.config.extra) == "table"
+            and loc_ref.config.extra[name] ~= nil then
+        return loc_ref.config.extra[name]
+    end
+    if card and type(card.config) == "table" and card.config[name] ~= nil then
+        return card.config[name]
+    end
+    if card and type(card.ability) == "table" and card.ability[name] ~= nil then
+        return card.ability[name]
+    end
+    if card and type(card.ability) == "table"
+            and type(card.ability.extra) == "table"
+            and card.ability.extra[name] ~= nil then
+        return card.ability.extra[name]
+    end
+    return nil
+end
+
+local function _push_known_pair(out, seen, label, value)
+    local value_type = type(value)
+    if value_type ~= "number" and value_type ~= "string" and value_type ~= "boolean" then
+        return
+    end
+    local entry = label .. "=" .. tostring(value)
+    if not seen[entry] then
+        seen[entry] = true
+        table.insert(out, entry)
+    end
+end
+
+local function _append_table_values(out, seen, prefix, tbl, names)
+    if type(tbl) ~= "table" then return end
+    for _, name in ipairs(names) do
+        _push_known_pair(out, seen, prefix .. name, tbl[name])
+    end
+end
+
+local function _append_known_values(description, loc_ref, card)
+    local s = _clean_description(description)
+    if not s then return "" end
+    if not s:find("%?") then return s end
+
+    local pairs_list = {}
+    local seen = {}
+    local fields = {
+        "t_mult", "t_chips", "s_mult", "x_mult", "mult", "chips",
+        "extra", "extra_disp", "type", "suit", "hand_type",
+        "levels", "dollars", "odds", "max", "h_size",
+        "dollars_per_hand", "dollars_per_discard",
+        "spawn_jokers", "skip_bonus", "orbital_hand"
+    }
+
+    if loc_ref then
+        _append_table_values(pairs_list, seen, "center.", loc_ref, fields)
+        if type(loc_ref.config) == "table" then
+            _append_table_values(pairs_list, seen, "config.", loc_ref.config, fields)
+            if type(loc_ref.config.extra) == "table" then
+                _append_table_values(pairs_list, seen, "config.extra.", loc_ref.config.extra, fields)
+            end
+        end
+    end
+
+    if card then
+        _append_table_values(pairs_list, seen, "card.", card, fields)
+        if type(card.config) == "table" then
+            _append_table_values(pairs_list, seen, "card.config.", card.config, fields)
+        end
+        if type(card.ability) == "table" then
+            _append_table_values(pairs_list, seen, "ability.", card.ability, fields)
+            if type(card.ability.extra) == "table" then
+                _append_table_values(pairs_list, seen, "ability.extra.", card.ability.extra, fields)
+            end
+        end
+    end
+
+    table.sort(pairs_list)
+    if #pairs_list > 0 then
+        s = s .. " [known values: " .. table.concat(pairs_list, ", ") .. "]"
+    end
+    return s
+end
+
+local function _render_known_fallback(set, key, loc_ref, card)
+    local played_type = _lookup_structured_value(loc_ref, card, "type")
+    local t_mult = _lookup_structured_value(loc_ref, card, "t_mult")
+    if played_type and t_mult then
+        return string.format("+%s Mult if played hand contains a %s", tostring(t_mult), tostring(played_type))
+    end
+
+    local t_chips = _lookup_structured_value(loc_ref, card, "t_chips")
+    if played_type and t_chips then
+        return string.format("+%s Chips if played hand contains a %s", tostring(t_chips), tostring(played_type))
+    end
+
+    local suit = _lookup_structured_value(loc_ref, card, "suit")
+    local s_mult = _lookup_structured_value(loc_ref, card, "s_mult")
+    if suit and s_mult then
+        return string.format("+%s Mult for scored %s cards", tostring(s_mult), tostring(suit))
+    end
+
+    if set == "Voucher" then
+        local display_extra = _lookup_structured_value(loc_ref, card, "extra_disp")
+        local raw_extra = _lookup_structured_value(loc_ref, card, "extra")
+        local shown_extra = display_extra or raw_extra
+        if (key == "v_tarot_merchant" or key == "v_tarot_tycoon") and shown_extra then
+            return string.format("Tarot cards appear %sX more frequently in the shop", tostring(shown_extra))
+        end
+        if (key == "v_planet_merchant" or key == "v_planet_tycoon") and shown_extra then
+            return string.format("Planet cards appear %sX more frequently in the shop", tostring(shown_extra))
+        end
+        if (key == "v_clearance_sale" or key == "v_liquidation") and raw_extra then
+            return string.format("All cards and packs in the shop are %s%% off", tostring(raw_extra))
+        end
+        if (key == "v_hone" or key == "v_glow_up") and raw_extra then
+            return string.format(
+                "Foil, Holographic, and Polychrome cards appear %sX more often",
+                tostring(raw_extra)
+            )
+        end
+    end
+
+    if set == "Tag" then
+        if key == "tag_investment" then
+            local dollars = _lookup_structured_value(loc_ref, card, "dollars")
+            if dollars then
+                return string.format("After defeating the Boss Blind, gain $%s", tostring(dollars))
+            end
+        end
+        if key == "tag_handy" then
+            local dollars_per_hand = _lookup_structured_value(loc_ref, card, "dollars_per_hand")
+            if dollars_per_hand then
+                return string.format("Earn $%s per hand played this run", tostring(dollars_per_hand))
+            end
+        end
+        if key == "tag_garbage" then
+            local dollars_per_discard = _lookup_structured_value(loc_ref, card, "dollars_per_discard")
+            if dollars_per_discard then
+                return string.format("Earn $%s per unused discard this run", tostring(dollars_per_discard))
+            end
+        end
+        if key == "tag_juggle" then
+            local hand_size = _lookup_structured_value(loc_ref, card, "h_size")
+            if hand_size then
+                return string.format("+%s hand size next round", tostring(hand_size))
+            end
+        end
+        if key == "tag_top_up" then
+            local spawn_jokers = _lookup_structured_value(loc_ref, card, "spawn_jokers")
+            if spawn_jokers then
+                return string.format("Create up to %s Common Jokers", tostring(spawn_jokers))
+            end
+        end
+        if key == "tag_skip" then
+            local skip_bonus = _lookup_structured_value(loc_ref, card, "skip_bonus")
+            if skip_bonus then
+                return string.format("Earn $%s per skipped Blind this run", tostring(skip_bonus))
+            end
+        end
+        if key == "tag_orbital" then
+            local hand_type = _lookup_structured_value(loc_ref, card, "orbital_hand")
+            local levels = _lookup_structured_value(loc_ref, card, "levels")
+            if hand_type and levels and not tostring(hand_type):find("^%[") then
+                return string.format("Upgrade %s by %s levels", tostring(hand_type), tostring(levels))
+            end
+        end
+        if key == "tag_economy" then
+            local dollars = _lookup_structured_value(loc_ref, card, "max")
+            if dollars then
+                return string.format("Double your money (Max of $%s)", tostring(dollars))
+            end
+        end
+    end
+
+    return nil
+end
+
 function State.render_description(set, key, loc_ref, card)
+    local best = nil
+
+    -- PRIMARY: Try the base-game reference catalog first.
+    -- This provides deterministic, known-good descriptions for all
+    -- base-game items and avoids unresolved #N# placeholders.
+    if set and key then
+        best = _pick_better_description(best, _render_from_catalog(set, key, loc_ref, card))
+    end
+
     -- PREFERRED: canonical Balatro render via the Card's ability table.
     -- This handles Planets, Jokers, Vouchers, Tarots, Spectrals — anything
     -- with per-card variable substitution. Only available when we have a
     -- live Card instance (not for tags or blinds, which go through the
     -- loc_vars path below).
     if card then
-        local rendered = _render_via_ability_table(card)
-        if rendered and rendered ~= "" then
-            -- strip_markup is idempotent; if the ability table produced
-            -- any stray {C:..} fragments (SMODS adds custom markup
-            -- occasionally), scrub them.
-            return strip_markup(rendered)
-        end
+        best = _pick_better_description(best, _render_via_ability_table(card))
     end
 
-    -- Planet-specific fallback: if ability-table extraction failed but
-    -- the center clearly identifies a poker hand, synthesize the
-    -- description ourselves. Without this we'd emit `Level up ? +? Mult`,
-    -- which is useless to a model trying to decide whether to use the
-    -- planet now or save it for later.
+    best = _pick_better_description(best, _render_known_fallback(set, key, loc_ref, card))
     if set == "Planet" then
-        local p = _render_planet_fallback(loc_ref)
-        if p then return p end
+        best = _pick_better_description(best, _render_planet_fallback(loc_ref))
     end
 
-    if not set or not key then return "" end
-    if not (G and G.localization and G.localization.descriptions) then return "" end
+    if not set or not key then return _append_known_values(best, loc_ref, card) end
+    if not (G and G.localization and G.localization.descriptions) then
+        return _append_known_values(best, loc_ref, card)
+    end
     local bucket = G.localization.descriptions[set]
-    if not bucket then return "" end
+    if not bucket then return _append_known_values(best, loc_ref, card) end
     local loc = bucket[key]
-    if not loc or not loc.text then return "" end
+    if not loc or not loc.text then return _append_known_values(best, loc_ref, card) end
 
     -- Ask the center for its substitution vars. This is how Balatro's own
     -- UI resolves per-joker numeric placeholders for cards whose centers
@@ -301,11 +645,16 @@ function State.render_description(set, key, loc_ref, card)
         if ok and type(loc_def) == "table" and loc_def.vars then
             vars = loc_def.vars
         end
+    elseif set == "Tag" and card and type(card.get_uibox_table) == "function" then
+        local ok, tag_vars = pcall(card.get_uibox_table, card, nil, true)
+        if ok and type(tag_vars) == "table" then
+            vars = tag_vars
+        end
     end
 
     local rendered = substitute_vars(loc.text, vars)
     local s = table.concat(rendered, " ")
-    s = strip_markup(s)
+    best = _pick_better_description(best, s)
 
     -- TRAILING-NIL DISCLOSURE: even after substitute_vars, `?` markers
     -- can remain in two cases:
@@ -325,23 +674,7 @@ function State.render_description(set, key, loc_ref, card)
     -- model at least sees the numbers that exist, in a format it can
     -- read. Only fires when the rendered description still has `?`
     -- (the common case is zero).
-    if s:find("?") and card and type(card.ability) == "table"
-            and type(card.ability.extra) == "table" then
-        local pairs_list = {}
-        for k, v in pairs(card.ability.extra) do
-            if type(v) == "number" or type(v) == "string" or type(v) == "boolean" then
-                table.insert(pairs_list, tostring(k) .. "=" .. tostring(v))
-            end
-        end
-        -- Sort alphabetically so output is stable across runs (Lua
-        -- pairs() iteration order isn't guaranteed).
-        table.sort(pairs_list)
-        if #pairs_list > 0 then
-            s = s .. " [raw values: " .. table.concat(pairs_list, ", ") .. "]"
-        end
-    end
-
-    return s
+    return _append_known_values(best, loc_ref, card)
 end
 
 -- Rank display names
@@ -792,6 +1125,9 @@ function State.extract_blinds()
         end)
         if ok and type(t) == "table" then
             instance = t
+            if type(instance.set_ability) == "function" then
+                pcall(instance.set_ability, instance)
+            end
         end
 
         if not instance then

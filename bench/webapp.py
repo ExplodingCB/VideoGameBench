@@ -220,6 +220,40 @@ CURATED_MODELS = {
         "qwen-3-32b",
         "qwen-3-coder-480b",
     ],
+    "opencode": [
+        # OpenCode's free-tier gateway. Routed through a locally-spawned
+        # `opencode serve` process — no API key needed, billed against
+        # OpenCode's free quota. Capabilities vary wildly: gpt-5-nano is
+        # weakest, minimax / nemotron / qwen3.6 are bigger and worth a
+        # shot for real benchmark runs. Prefixed with `opencode/` because
+        # OpencodeAdapter splits "providerID/modelID" — the prefix is
+        # what tells opencode-the-server to use its free gateway rather
+        # than route to a vendor.
+        "opencode/minimax-m2.5-free",
+        "opencode/nemotron-3-super-free",
+        "opencode/qwen3.6-plus-free",
+        "opencode/big-pickle",
+        "opencode/gpt-5-nano",
+    ],
+    "codex": [
+        # OpenAI's `codex exec` CLI, billed against the user's ChatGPT
+        # subscription via `codex login`. Each chat() spawns a fresh codex
+        # subprocess; reasoning_effort defaults to xhigh which makes turns
+        # slow (~90s) but high-quality. ChatGPT subscription auth restricts
+        # which models are usable — gpt-5.4-nano returned HTTP 400 with
+        # "model is not supported when using Codex with a ChatGPT account"
+        # in our smoke tests, so the curated list below is conservative.
+        # Users can still type any model ID by hand if their plan allows
+        # it (Pro / Team tiers may have access to more variants).
+        "gpt-5.4",
+        "gpt-5.4-pro",
+        "gpt-5.4-mini",
+        "gpt-5",
+        "gpt-5-codex",
+        "gpt-5.1-codex",
+        "gpt-5.2-codex",
+        "gpt-5.3-codex",
+    ],
 }
 
 

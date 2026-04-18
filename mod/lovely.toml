@@ -37,6 +37,12 @@ name = "balatrobench_overlay"
 
 [[patches]]
 [patches.module]
+source = "base_game_reference.lua"
+before = "main.lua"
+name = "balatrobench_base_game_ref"
+
+[[patches]]
+[patches.module]
 source = "BalatroBench.lua"
 before = "main.lua"
 name = "balatrobench_main"

@@ -169,6 +169,18 @@ STATIC_CONTEXT_WINDOWS: dict[str, int] = {
     "llama-4-scout-17b-16e-instruct": 128_000,
     "qwen-3-32b": 128_000,
     "qwen-3-coder-480b": 128_000,
+
+    # OpenCode gateway free tier (April 2026). These get routed through
+    # `opencode serve` with no API key — billed against OpenCode's free
+    # quota, not the underlying vendor. Context windows below are each
+    # base model's nominal capacity; OpenCode itself burns ~9.5k tokens
+    # of system prompt overhead per request, which the OpencodeAdapter
+    # subtracts when reporting effective window to the runner.
+    "opencode/gpt-5-nano": 400_000,
+    "opencode/minimax-m2.5-free": 196_000,
+    "opencode/nemotron-3-super-free": 128_000,
+    "opencode/qwen3.6-plus-free": 256_000,
+    "opencode/big-pickle": 128_000,  # unknown base model — conservative default
 }
 
 DEFAULT_CONTEXT_WINDOW = 128_000
@@ -312,7 +324,13 @@ def lookup_context_window(model_id: str, provider: str = "openrouter") -> int:
 PROVIDERS_OPENAI_COMPATIBLE = {"openrouter", "openai", "inception", "cerebras", "local", "custom"}
 PROVIDER_ANTHROPIC = "anthropic"
 PROVIDER_GOOGLE = "google"
-ALL_PROVIDERS = PROVIDERS_OPENAI_COMPATIBLE | {PROVIDER_ANTHROPIC, PROVIDER_GOOGLE}
+# `opencode` and `codex` are CLI-driven wrappers — they shell out to a
+# locally-installed CLI (opencode serve / codex exec) that handles its
+# own auth. opencode uses the free opencode/* gateway with no key; codex
+# uses the user's `~/.codex/auth.json` (typically ChatGPT subscription).
+ALL_PROVIDERS = PROVIDERS_OPENAI_COMPATIBLE | {
+    PROVIDER_ANTHROPIC, PROVIDER_GOOGLE, "opencode", "codex",
+}
 
 
 class ModelAdapter:
@@ -1175,6 +1193,698 @@ class GeminiAdapter:
 
 
 # ---------------------------------------------------------------------------
+# OpenCode adapter
+# ---------------------------------------------------------------------------
+# Routes through a locally-spawned `opencode serve` process. The big win:
+# the `opencode/*` gateway exposes free models (gpt-5-nano, minimax-m2.5-free,
+# nemotron-3-super-free, qwen3.6-plus-free, big-pickle) with NO auth and
+# `cost: 0`, billed against OpenCode's free-tier quota rather than a vendor
+# API key. Useful for cheap baseline runs.
+#
+# Caveat: every request goes through OpenCode's coding-agent system prompt
+# (~9.5k input tokens of overhead before our messages even arrive). The
+# model still returns clean JSON when our user-message system prompt is
+# emphatic enough — verified empirically — but the token overhead means
+# we subtract ~10k from each model's nominal context window when reporting it.
+#
+# Wire shape (undocumented in `opencode serve`'s OpenAPI spec, discovered
+# by probing):
+#   POST /session                              → {id: "ses_..."}
+#   POST /session/{id}/message  body:
+#     {parts: [{type:"text", text:"..."}],
+#      model: {providerID:"opencode", modelID:"<name>"},
+#      agent?: "<name>"}                       → full message dict (synchronous)
+# Response shape:
+#   {info: {tokens: {input,output,reasoning,...}, cost, finish, ...},
+#    parts: [{type:"step-start"}, {type:"reasoning", text:...},
+#            {type:"text", text:...}, {type:"step-finish"}]}
+#
+# Server lifecycle: one `opencode serve` per process, spawned lazily on
+# the first chat() call, cached on the class, killed via atexit.
+
+import atexit
+import shutil
+import subprocess
+import tempfile
+import threading
+
+
+PROVIDER_OPENCODE = "opencode"
+
+
+class OpencodeAdapter:
+    """Adapter that routes through a local `opencode serve` process to
+    talk to OpenCode's free model gateway (opencode/*).
+
+    Model IDs may be passed bare (`gpt-5-nano`) or namespaced
+    (`opencode/gpt-5-nano`) — the namespace defaults to `opencode` so
+    the existing free models Just Work. To talk to a different OpenCode-
+    routed provider through the same server, pass `<providerID>/<modelID>`.
+    """
+
+    # Class-level so multiple adapter instances in one process share one
+    # `opencode serve`. Locked to make the lazy-spawn race-safe — the
+    # webapp runs benchmarks on a thread pool, so two adapters can race.
+    _server_lock = threading.Lock()
+    _server_proc: subprocess.Popen | None = None
+    _server_url: str | None = None
+    _server_workdir: str | None = None
+
+    def __init__(
+        self,
+        model: str,
+        api_key: str | None = None,  # ignored — opencode handles auth itself
+        temperature: float = 0.3,
+        max_tokens: int = 16384,
+        endpoint: str | None = None,  # ignored — we manage the server URL
+        agent: str | None = None,
+    ):
+        # Split "providerID/modelID" — fall back to provider="opencode"
+        # for bare names so users can just write "gpt-5-nano".
+        if "/" in model:
+            self.provider_id, self.model_id = model.split("/", 1)
+        else:
+            self.provider_id, self.model_id = "opencode", model
+        # Public `model` keeps the namespaced form so the runner / webapp
+        # surfaces a recognizable string in logs and the leaderboard.
+        self.model = f"{self.provider_id}/{self.model_id}"
+        self.provider = PROVIDER_OPENCODE
+        self.temperature = temperature  # opencode doesn't expose temperature
+        self.max_tokens = max_tokens    # opencode controls output length itself
+        self.agent = agent
+
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.total_requests = 0
+        self._context_window: int | None = None
+
+    # ---------- server lifecycle ----------
+
+    @staticmethod
+    def _pick_free_port() -> int:
+        """Bind to port 0 to let the OS pick a free port, then close the
+        socket and return the port. Tiny race window before opencode binds
+        it but negligible in practice."""
+        import socket as _socket
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
+    @classmethod
+    def _ensure_server(cls) -> str:
+        """Spawn `opencode serve --port <chosen>` once per process and
+        wait for /global/health to answer. We pick the port ourselves
+        rather than parsing it from opencode's stdout — Windows + npm's
+        bash/cmd shims make stdout pipes unreliable, but health-polling
+        an HTTP port works the same on every platform."""
+        with cls._server_lock:
+            if cls._server_url and cls._server_proc and cls._server_proc.poll() is None:
+                return cls._server_url
+
+            # Reset stale handles if a previous process died
+            cls._server_proc = None
+            cls._server_url = None
+
+            # On Windows, npm installs both a bash shim (no extension) and
+            # a .cmd batch file. The bash shim doesn't propagate stdout/
+            # exit cleanly through Popen, so prefer the .cmd.
+            opencode = None
+            if os.name == "nt":
+                opencode = (shutil.which("opencode.cmd")
+                            or shutil.which("opencode.exe")
+                            or shutil.which("opencode"))
+            else:
+                opencode = shutil.which("opencode")
+            if not opencode:
+                raise RuntimeError(
+                    "opencode CLI not found on PATH. Install from "
+                    "https://opencode.ai or `npm i -g opencode-ai`."
+                )
+
+            # Blank cwd so opencode doesn't index the bench's source tree.
+            cls._server_workdir = tempfile.mkdtemp(prefix="balatrobench-opencode-")
+            port = cls._pick_free_port()
+
+            # Detach stdio to DEVNULL so we never block on a full pipe
+            # buffer — we don't read opencode's logs, we poll its HTTP
+            # endpoint to know when it's ready.
+            # CREATE_NEW_PROCESS_GROUP on Windows so Ctrl-C in the parent
+            # doesn't propagate to opencode (we manage shutdown via atexit).
+            popen_kwargs: dict = dict(
+                cwd=cls._server_workdir,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+            )
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+                # .cmd / .bat batch files need cmd.exe to interpret them;
+                # Popen with a list won't dispatch through cmd by default.
+                # shell=True wraps the call appropriately on Windows.
+                if opencode.lower().endswith((".cmd", ".bat")):
+                    popen_kwargs["shell"] = True
+
+            proc = subprocess.Popen(
+                [opencode, "serve", "--port", str(port)],
+                **popen_kwargs,
+            )
+
+            # Poll /global/health until opencode answers or we give up.
+            url = f"http://127.0.0.1:{port}"
+            deadline = time.time() + 45
+            last_err: str | None = None
+            while time.time() < deadline:
+                if proc.poll() is not None:
+                    raise RuntimeError(
+                        f"opencode serve exited before becoming ready "
+                        f"(exit code {proc.returncode}, port {port})"
+                    )
+                try:
+                    r = requests.get(f"{url}/global/health", timeout=2)
+                    if r.ok and r.json().get("healthy"):
+                        cls._server_proc = proc
+                        cls._server_url = url
+                        atexit.register(cls._shutdown_server)
+                        return url
+                    last_err = f"health returned HTTP {r.status_code}"
+                except requests.RequestException as e:
+                    last_err = str(e)
+                time.sleep(0.5)
+
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+            raise RuntimeError(
+                f"opencode serve on port {port} didn't become healthy "
+                f"within 45s (last: {last_err})"
+            )
+
+    @classmethod
+    def _shutdown_server(cls) -> None:
+        with cls._server_lock:
+            if cls._server_proc and cls._server_proc.poll() is None:
+                try:
+                    cls._server_proc.terminate()
+                    try:
+                        cls._server_proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        cls._server_proc.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+            cls._server_proc = None
+            cls._server_url = None
+
+    # ---------- public interface ----------
+
+    def get_context_window(self) -> int:
+        if self._context_window is None:
+            # Look up by namespaced ID first, then bare model_id.
+            ctx = STATIC_CONTEXT_WINDOWS.get(self.model)
+            if ctx is None:
+                ctx = STATIC_CONTEXT_WINDOWS.get(self.model_id, DEFAULT_CONTEXT_WINDOW)
+            # Subtract opencode's baked-in system-prompt overhead so the
+            # runner's context-management math doesn't blow past the real
+            # limit. ~9.5k measured empirically; round up for safety.
+            self._context_window = max(8000, ctx - 12_000)
+        return self._context_window
+
+    @staticmethod
+    def _flatten_messages(messages: list[dict]) -> str:
+        """Collapse a chat-completions message list into one user-message
+        text block. We can't override opencode's session system prompt,
+        and feeding multi-turn history through opencode's session model
+        gets murky fast — so the bench-side approach is: fresh session
+        per call, our entire conversation transcript dumped as ONE user
+        message. The runner already passes full history each call.
+
+        Roles are preserved as inline labels so the model still sees the
+        turn structure (which matters for parsing stuff like "your last
+        action was...")."""
+        parts: list[str] = []
+        for m in messages:
+            role = (m.get("role") or "user").upper()
+            content = m.get("content", "")
+            if isinstance(content, list):
+                # OpenAI block content; flatten to text
+                content = "".join(
+                    b.get("text", "") for b in content if isinstance(b, dict)
+                )
+            parts.append(f"[{role}]\n{content}")
+        return "\n\n".join(parts)
+
+    def _post_message(self, base_url: str, text: str) -> dict:
+        sid_resp = requests.post(
+            f"{base_url}/session",
+            json={},
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        sid_resp.raise_for_status()
+        sid = sid_resp.json()["id"]
+
+        body: dict = {
+            "parts": [{"type": "text", "text": text}],
+            "model": {"providerID": self.provider_id, "modelID": self.model_id},
+        }
+        if self.agent:
+            body["agent"] = self.agent
+
+        msg_resp = requests.post(
+            f"{base_url}/session/{sid}/message",
+            json=body,
+            headers={"Content-Type": "application/json"},
+            timeout=600,  # local server, but the upstream model can be slow
+        )
+        msg_resp.raise_for_status()
+        return msg_resp.json()
+
+    @staticmethod
+    def _extract_text(parts: list[dict]) -> tuple[str, str]:
+        """Return (final_text, all_reasoning_concatenated)."""
+        text_chunks: list[str] = []
+        reasoning_chunks: list[str] = []
+        for p in parts or []:
+            ptype = p.get("type")
+            if ptype == "text" and isinstance(p.get("text"), str):
+                text_chunks.append(p["text"])
+            elif ptype == "reasoning" and isinstance(p.get("text"), str):
+                reasoning_chunks.append(p["text"])
+        return "".join(text_chunks).strip(), "".join(reasoning_chunks)
+
+    def chat(self, messages: list[dict]) -> tuple[str, dict]:
+        try:
+            base_url = self._ensure_server()
+        except RuntimeError as e:
+            return "", {"error": str(e)}
+
+        text_payload = self._flatten_messages(messages)
+        start_time = time.time()
+        try:
+            data = self._post_message(base_url, text_payload)
+        except requests.exceptions.Timeout:
+            return "", {"error": "Request timed out"}
+        except requests.exceptions.ConnectionError:
+            return "", {"error": f"Cannot connect to opencode server at {base_url}"}
+        except requests.exceptions.HTTPError as e:
+            body = ""
+            try:
+                err = e.response.json()
+                body = err.get("error") if isinstance(err.get("error"), str) else json.dumps(err.get("error"))
+            except Exception:  # noqa: BLE001
+                body = str(e)
+            status = e.response.status_code if e.response is not None else "?"
+            return "", {"error": f"HTTP {status}: {body}"}
+
+        elapsed = time.time() - start_time
+        info = data.get("info") or {}
+        tokens = info.get("tokens") or {}
+        prompt_tokens = int(tokens.get("input") or 0)
+        completion_tokens = int(tokens.get("output") or 0)
+        # Reasoning tokens are tracked separately by opencode; roll them
+        # into completion so the leaderboard's totals reflect actual
+        # work the model did.
+        completion_tokens += int(tokens.get("reasoning") or 0)
+
+        text, _reasoning = self._extract_text(data.get("parts") or [])
+
+        self.total_prompt_tokens += prompt_tokens
+        self.total_completion_tokens += completion_tokens
+        self.total_requests += 1
+
+        return text, {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "elapsed_seconds": elapsed,
+            "finish_reason": info.get("finish"),
+        }
+
+    def chat_stream(self, messages: list[dict]) -> Iterator[tuple[str, object]]:
+        """Pseudo-stream: opencode's /message endpoint is synchronous JSON,
+        not SSE. We do one blocking call, then surface reasoning + final
+        text as deltas so the dashboard's live overlay still has something
+        to show. Real streaming would require subscribing to the
+        /session/{id}/event SSE channel — left as a TODO; the bench's main
+        loop only needs a (text, usage) round-trip anyway."""
+        try:
+            base_url = self._ensure_server()
+        except RuntimeError as e:
+            yield ("error", {"error": str(e)}); return
+
+        text_payload = self._flatten_messages(messages)
+        start_time = time.time()
+        try:
+            data = self._post_message(base_url, text_payload)
+        except requests.exceptions.Timeout:
+            yield ("error", {"error": "Request timed out"}); return
+        except requests.exceptions.ConnectionError:
+            yield ("error", {"error": f"Cannot connect to opencode server at {base_url}"}); return
+        except requests.exceptions.HTTPError as e:
+            body = ""
+            try:
+                err = e.response.json()
+                body = err.get("error") if isinstance(err.get("error"), str) else json.dumps(err.get("error"))
+            except Exception:  # noqa: BLE001
+                body = str(e)
+            status = e.response.status_code if e.response is not None else "?"
+            yield ("error", {"error": f"HTTP {status}: {body}"}); return
+
+        elapsed = time.time() - start_time
+        info = data.get("info") or {}
+        tokens = info.get("tokens") or {}
+        prompt_tokens = int(tokens.get("input") or 0)
+        completion_tokens = int(tokens.get("output") or 0) + int(tokens.get("reasoning") or 0)
+
+        text, reasoning = self._extract_text(data.get("parts") or [])
+
+        # Surface reasoning first (matches the ordering Anthropic /
+        # Gemini emit), then the final answer. The dashboard concatenates
+        # deltas in arrival order.
+        if reasoning:
+            yield ("delta", reasoning)
+        if text:
+            yield ("delta", text)
+
+        self.total_prompt_tokens += prompt_tokens
+        self.total_completion_tokens += completion_tokens
+        self.total_requests += 1
+
+        yield ("done", {
+            "text": text,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "elapsed_seconds": elapsed,
+                "finish_reason": info.get("finish"),
+            },
+        })
+
+    def get_total_usage(self) -> dict:
+        return {
+            "prompt_tokens": self.total_prompt_tokens,
+            "completion_tokens": self.total_completion_tokens,
+            "total_tokens": self.total_prompt_tokens + self.total_completion_tokens,
+            "total_requests": self.total_requests,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Codex CLI adapter
+# ---------------------------------------------------------------------------
+# Drives OpenAI's `codex exec` CLI as a subprocess per turn. Auth comes
+# from the user's existing `~/.codex/auth.json` (ChatGPT login), so this
+# is billed against their ChatGPT Plus/Pro quota — no API key needed.
+#
+# Per-turn invocation:
+#   codex exec --json --ephemeral --skip-git-repo-check
+#              -s read-only
+#              --output-last-message <answer.txt>
+#              -m <model>
+#              -c model_reasoning_effort="xhigh"
+#              --cd <tempdir>
+#              "<flattened messages>"
+#
+# We deliberately do NOT pass --output-schema. Codex routes through
+# OpenAI's structured-outputs API in strict mode (additionalProperties
+# must be false, every property must be required), and our experiments
+# with a multi-field schema covering all 15 mod action verbs caused
+# gpt-5.4 + xhigh to time out at 10+ minutes — apparently the model
+# reasons heavily about which fields to null out for each turn. The
+# runner already does its own JSON extraction at runner.py:64, so a
+# prompt-side instruction to emit JSON is sufficient and matches how
+# every other adapter behaves. If response quality turns out to be
+# unreliable we can add a discriminated-union (oneOf) schema later.
+#
+# Streaming events come on stdout as JSONL; we tail them for usage data
+# (`turn.completed` carries input_tokens / output_tokens / cached_input_tokens)
+# and read --output-last-message for the actual answer text.
+
+PROVIDER_CODEX = "codex"
+
+
+class CodexAdapter:
+    """Adapter that runs OpenAI's `codex exec` CLI per chat() call.
+    Auth is whatever `codex login` set up — typically ChatGPT subscription
+    backed, so there's no API key to manage.
+
+    Model IDs are passed bare (`gpt-5.4`) or namespaced (`codex/gpt-5.4`).
+    The namespace is stripped before being passed to codex via -m.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        api_key: str | None = None,           # ignored — codex manages auth
+        temperature: float = 0.3,             # codex doesn't expose temperature
+        max_tokens: int = 16384,              # codex manages output length itself
+        endpoint: str | None = None,          # ignored
+        reasoning_effort: str = "xhigh",
+    ):
+        # Strip "codex/" prefix if present so we hand codex the raw model ID
+        if "/" in model:
+            ns, mid = model.split("/", 1)
+            self.model_id = mid if ns == "codex" else model
+        else:
+            self.model_id = model
+        self.model = f"codex/{self.model_id}"
+        self.provider = PROVIDER_CODEX
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
+
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.total_requests = 0
+        self._context_window: int | None = None
+
+    # ---------- helpers ----------
+
+    @staticmethod
+    def _resolve_codex_bin() -> str:
+        """Locate the codex CLI. Prefer .cmd on Windows because the bare
+        bash shim doesn't propagate stdio cleanly through subprocess."""
+        if os.name == "nt":
+            for candidate in ("codex.cmd", "codex.exe", "codex"):
+                p = shutil.which(candidate)
+                if p:
+                    return p
+        else:
+            p = shutil.which("codex")
+            if p:
+                return p
+        raise RuntimeError(
+            "codex CLI not found on PATH. Install from "
+            "https://developers.openai.com/codex/cli or `npm i -g @openai/codex`."
+        )
+
+    @staticmethod
+    def _flatten_messages(messages: list[dict]) -> str:
+        """Collapse a chat-style message list into one prompt for `codex
+        exec`. We do NOT use [SYSTEM]/[USER] role labels — Codex's
+        gpt-5.x models interpret them as prompt-injection attempts and
+        refuse to respond. Instead: concat system messages as inline
+        instructions, then any user/assistant turns separated by markdown
+        headers. The runner mostly sends one system + one user per call
+        anyway."""
+        system_parts: list[str] = []
+        turns: list[str] = []
+        for m in messages:
+            role = (m.get("role") or "user").lower()
+            content = m.get("content", "")
+            if isinstance(content, list):
+                content = "".join(
+                    b.get("text", "") for b in content if isinstance(b, dict)
+                )
+            if not isinstance(content, str):
+                content = str(content)
+            if role == "system":
+                system_parts.append(content)
+            elif role == "assistant":
+                # Past assistant turns become "previous reply" context
+                turns.append(f"## Previous reply\n{content}")
+            else:
+                turns.append(content)
+        out = ""
+        if system_parts:
+            out = "\n\n".join(system_parts)
+        if turns:
+            if out:
+                out += "\n\n## Current turn\n" + "\n\n".join(turns)
+            else:
+                out = "\n\n".join(turns)
+        return out
+
+    @staticmethod
+    def _parse_jsonl_usage(stdout_text: str) -> tuple[int, int, str | None]:
+        """Walk codex's JSONL stream looking for `turn.completed` and any
+        agent_message text. Returns (input_tokens, output_tokens, message_text)
+        — message_text is a fallback if --output-last-message wasn't readable."""
+        prompt_tokens = 0
+        completion_tokens = 0
+        message_text: str | None = None
+        for line in stdout_text.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                evt = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            etype = evt.get("type")
+            if etype == "turn.completed":
+                usage = evt.get("usage") or {}
+                prompt_tokens = int(usage.get("input_tokens") or 0)
+                completion_tokens = int(usage.get("output_tokens") or 0)
+            elif etype == "item.completed":
+                item = evt.get("item") or {}
+                if item.get("type") == "agent_message":
+                    txt = item.get("text")
+                    if isinstance(txt, str):
+                        message_text = txt
+        return prompt_tokens, completion_tokens, message_text
+
+    # ---------- public interface ----------
+
+    def get_context_window(self) -> int:
+        if self._context_window is None:
+            ctx = STATIC_CONTEXT_WINDOWS.get(self.model)
+            if ctx is None:
+                ctx = STATIC_CONTEXT_WINDOWS.get(self.model_id, DEFAULT_CONTEXT_WINDOW)
+            # Codex wraps the prompt in its own coding-agent system prompt
+            # (~10–15k tokens of preamble). Subtract a conservative pad so
+            # the runner's context-management math doesn't overflow.
+            self._context_window = max(8000, ctx - 16_000)
+        return self._context_window
+
+    def chat(self, messages: list[dict]) -> tuple[str, dict]:
+        try:
+            codex_bin = self._resolve_codex_bin()
+        except RuntimeError as e:
+            return "", {"error": str(e)}
+
+        # Each call gets its own --output-last-message file and working
+        # directory. Working dir is empty/temp so Codex's read-only sandbox
+        # doesn't accidentally crawl the bench's source tree.
+        workdir = tempfile.mkdtemp(prefix="balatrobench-codex-")
+        out_fd, out_path = tempfile.mkstemp(
+            prefix="balatrobench-codex-msg-", suffix=".txt", dir=workdir
+        )
+        os.close(out_fd)
+
+        cmd = [
+            codex_bin, "exec",
+            "--json",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "-s", "read-only",
+            "--output-last-message", out_path,
+            "-m", self.model_id,
+            "-c", f'model_reasoning_effort="{self.reasoning_effort}"',
+            "--cd", workdir,
+            self._flatten_messages(messages),
+        ]
+
+        popen_kwargs: dict = dict(
+            cwd=workdir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            if codex_bin.lower().endswith((".cmd", ".bat")):
+                popen_kwargs["shell"] = True
+
+        start_time = time.time()
+        try:
+            proc = subprocess.Popen(cmd, **popen_kwargs)
+        except OSError as e:
+            return "", {"error": f"Failed to spawn codex: {e}"}
+
+        # Generous timeout: gpt-5.4 at xhigh reasoning has been seen at
+        # ~90s/turn in smoke tests; double it for headroom on harder turns.
+        try:
+            stdout, stderr = proc.communicate(timeout=600)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                stdout, stderr = proc.communicate(timeout=10)
+            except Exception:  # noqa: BLE001
+                stdout, stderr = "", ""
+            return "", {"error": "codex exec timed out after 600s"}
+
+        elapsed = time.time() - start_time
+
+        if proc.returncode != 0:
+            # Surface BOTH streams — codex prints info to stderr and JSON
+            # events to stdout, errors can land in either.
+            combined = (stderr or "") + "\n---STDOUT---\n" + (stdout or "")
+            tail = combined.strip().splitlines()[-15:]
+            return "", {"error": f"codex exec exited {proc.returncode}: "
+                                  + " | ".join(tail)}
+
+        prompt_tokens, completion_tokens, fallback_text = self._parse_jsonl_usage(stdout)
+
+        # Prefer the --output-last-message file (cleaner) but fall back to
+        # the JSONL agent_message item if the file wasn't written for some
+        # reason.
+        text = ""
+        try:
+            with open(out_path, "r", encoding="utf-8") as f:
+                text = f.read().strip()
+        except OSError:
+            text = (fallback_text or "").strip()
+
+        # Best-effort cleanup of the per-call workdir.
+        try:
+            os.remove(out_path)
+            os.rmdir(workdir)
+        except OSError:
+            pass
+
+        self.total_prompt_tokens += prompt_tokens
+        self.total_completion_tokens += completion_tokens
+        self.total_requests += 1
+
+        return text, {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "elapsed_seconds": elapsed,
+            "finish_reason": "stop",  # codex doesn't surface a finish reason
+        }
+
+    def chat_stream(self, messages: list[dict]) -> Iterator[tuple[str, object]]:
+        """Pseudo-stream — codex exec is synchronous from our side. We could
+        tail the JSONL stream for `item.completed` reasoning blocks, but
+        the bench loop only needs (text, usage) so we just yield the final
+        answer as one delta. Real streaming would mean parsing assistant_
+        message_started / delta events and re-shaping codex's protocol."""
+        text, usage = self.chat(messages)
+        if "error" in usage:
+            yield ("error", usage)
+            return
+        if text:
+            yield ("delta", text)
+        yield ("done", {"text": text, "usage": usage})
+
+    def get_total_usage(self) -> dict:
+        return {
+            "prompt_tokens": self.total_prompt_tokens,
+            "completion_tokens": self.total_completion_tokens,
+            "total_tokens": self.total_prompt_tokens + self.total_completion_tokens,
+            "total_requests": self.total_requests,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 def make_adapter(provider: str, model: str, api_key: str | None = None,
@@ -1190,6 +1900,12 @@ def make_adapter(provider: str, model: str, api_key: str | None = None,
     if provider == PROVIDER_GOOGLE:
         return GeminiAdapter(model=model, api_key=api_key, endpoint=endpoint,
                              temperature=temperature, max_tokens=max_tokens)
+    if provider == PROVIDER_OPENCODE:
+        return OpencodeAdapter(model=model, api_key=api_key, endpoint=endpoint,
+                               temperature=temperature, max_tokens=max_tokens)
+    if provider == PROVIDER_CODEX:
+        return CodexAdapter(model=model, api_key=api_key, endpoint=endpoint,
+                            temperature=temperature, max_tokens=max_tokens)
     # All remaining providers share the OpenAI-compatible chat-completions
     # shape. Unknown provider strings fall through to the generic adapter
     # too — if the endpoint speaks OpenAI, it'll work.
