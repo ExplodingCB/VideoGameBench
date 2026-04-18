@@ -28,32 +28,48 @@ consistently failing by breaking one of these. Read them carefully.
 
 2. Never play more than 5 cards. The game errors on 6+ and the turn is lost.
 
-3. Use discards when your hand is weak. If your best available hand is
-   around a low Pair or worse and you still have discards left, discard
-   3-5 cards to redraw. Unused discards at round-end are wasted potential.
-   Discards are a SEPARATE budget from hands — using a discard does not
-   use a hand.
+3. SURVEY FOR FLUSHES AND STRAIGHTS FIRST. Before playing any Pair/Two
+   Pair/Trips, count your hand's suit and rank distribution:
+   - 4+ cards of one suit in your 8-card hand → you are ONE DISCARD
+     from a Flush. Discard the off-suit cards, draw to fill the flush.
+   - 4+ ranks in a consecutive window (e.g. 5,6,7,8 or 9,10,J,Q-K) →
+     you are ONE DISCARD from a Straight. Discard the stragglers.
+   - Full House = a Three-of-a-Kind + a Pair. If you have a Trip, a
+     Pair on the side turns it into a Full House worth ~5x the Trip.
+   A Flush or Straight base-scores 30-35 chips × 4 mult PLUS all 5 card
+   chip values. A Pair base-scores 10 chips × 2 mult plus only 2 card
+   chip values. Flush/Straight out-scores Pair by ~6x before any
+   jokers. Pairs and Trips are what you play when you CAN'T reach a
+   5-card hand — not the default target.
 
-4. Default answer to "should I sell this joker?" is NO. Specifically:
+4. Use discards aggressively — they're free re-rolls. If your best
+   available hand is a Pair/Two Pair/Trips/High Card AND you have
+   discards left, DISCARD 3-5 cards to fish for a better 5-card hand.
+   Unused discards at round-end are wasted potential. Discards are a
+   SEPARATE budget from hands — using a discard does not use a hand.
+   Typical fish: keep your 4 best suit matches OR keep a near-straight,
+   discard the rest.
+
+5. Default answer to "should I sell this joker?" is NO. Specifically:
    - Do NOT sell to "free up a joker slot". Empty slots do nothing on
      their own; they're only useful once you fill them by buying.
    - Do NOT sell to "save money for next round". Selling refunds half
      the buy price (rounded down) — a net loss with zero benefit.
-   - Do NOT sell because you're low on money (see rule 5).
+   - Do NOT sell because you're low on money (see rule 6).
    The ONE acceptable reason to sell: you are replacing the joker right
    now, this shop visit, with a specific better joker visible for sale
    that your slots are too full to hold otherwise.
 
-5. If you have no money in the shop, use next_round to leave. Do not
+6. If you have no money in the shop, use next_round to leave. Do not
    sell items to "generate cash". Do not reroll. $0 is fine — money
    returns next round via blind rewards and interest. "I need a cash
    buffer" is not a real plan.
 
-6. Empty joker / consumable slots are NOT a resource. "[3/5] slots"
+7. Empty joker / consumable slots are NOT a resource. "[3/5] slots"
    means you own 3 items and have capacity for 2 more. The 2 empty
    slots contribute nothing to scoring. You do not need to "clear" them.
 
-7. On your last hand of a round, play your best possible hand even if
+8. On your last hand of a round, play your best possible hand even if
    it won't reach the target. A loss is a loss either way, but the
    partial score is what gets recorded for your benchmark result.
 
@@ -166,15 +182,36 @@ Build-up order:
   3. Apply JOKERS left to right. Each joker adds +Chips, +Mult, or xMult.
   4. Multiply the final Chips by the final Mult -> that's your score for this hand.
 
-Worked example: You have no jokers and play a Pair of 8s (8H + 8D) plus 3 filler cards.
-  Base Pair: 10 Chips, 2 Mult
-  + 8 chips (8H) + 8 chips (8D) = 26 Chips, 2 Mult
-  Score = 26 * 2 = 52 chips.
+Worked example — a Pair of 8s vs a Flush, same hand, no jokers:
 
-Worked example with jokers: Same Pair of 8s, with "Half Joker" (+20 Mult if hand has <=3 cards):
+  Option A: Pair of 8s (8H + 8D), 3 filler cards included to cycle.
+    Base Pair: 10 Chips, 2 Mult
+    + 8 (8H) + 8 (8D) = 26 Chips, 2 Mult
+    Score = 26 * 2 = 52 chips.
+
+  Option B: Flush of 5 hearts (QH + JH + 9H + 7H + 5H).
+    Base Flush: 35 Chips, 4 Mult
+    + 10 (QH) + 10 (JH) + 9 (9H) + 7 (7H) + 5 (5H) = 76 Chips, 4 Mult
+    Score = 76 * 4 = 304 chips.
+
+The Flush out-scores the Pair by ~6x before any jokers, even though
+BOTH use 5 hand cards. The Pair base (10ch × 2mult) is tiny; a Flush
+base (35ch × 4mult) is much bigger, AND every scoring card's chip
+value counts (not just the 2 in the Pair). If you have 4 hearts in
+your 8-card hand and any discards, you are one discard from this
+Flush — fish for it instead of defaulting to a Pair.
+
+Straights work the same (30 chips + 4 mult, all 5 cards score). Full
+House (40 chips + 4 mult) is a big upgrade over a plain Trip.
+
+Worked example with jokers — Pair of 8s + "Half Joker" (+20 Mult if
+played hand has 3 or fewer cards):
   26 Chips, 2 Mult
   + Half Joker: +20 Mult -> 26 Chips, 22 Mult
   Score = 26 * 22 = 572 chips.
+(The "3 or fewer cards" clause is WHY playing JUST the Pair is right
+here — jokers that reward short hands trump the 5-card Flush math.
+Always re-check the math when jokers are on the table.)
 
 Joker ORDER matters because they evaluate left to right. Put additive +Mult jokers BEFORE multiplicative xMult jokers to maximize the final product.
 
