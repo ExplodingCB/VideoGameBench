@@ -239,6 +239,101 @@ function Format.selecting_hand(state)
     for _, card in ipairs(state.hand) do
         table.insert(lines, fmt_card(card, card.index))
     end
+
+    -- HAND ANALYSIS: pre-computed suit and rank distribution so weaker
+    -- models don't have to count cards visually (they get it wrong —
+    -- observed a model claiming "3 spades" when the hand had 4,
+    -- hallucinating a 7-of-Diamonds that wasn't present, etc.). Strong
+    -- models will ignore this if they've already counted; weaker models
+    -- get an accurate ground-truth summary to reason against. Also
+    -- calls out "near" hands explicitly so the survey-for-flush rule
+    -- from the system prompt has something concrete to match on.
+    if #state.hand > 0 then
+        local suits = {Hearts = 0, Diamonds = 0, Clubs = 0, Spades = 0}
+        local ranks = {}  -- rank_name -> count
+        local rank_order = {["2"]=2,["3"]=3,["4"]=4,["5"]=5,["6"]=6,
+                            ["7"]=7,["8"]=8,["9"]=9,["10"]=10,
+                            Jack=11, Queen=12, King=13, Ace=14}
+        -- Indices grouped by suit — helpful when the model wants to
+        -- pick "all my spades" without transcribing card-by-card.
+        local suit_indices = {Hearts={}, Diamonds={}, Clubs={}, Spades={}}
+        for _, card in ipairs(state.hand) do
+            if card.suit and suits[card.suit] ~= nil then
+                suits[card.suit] = suits[card.suit] + 1
+                table.insert(suit_indices[card.suit], tostring(card.index))
+            end
+            if card.rank then
+                ranks[card.rank] = (ranks[card.rank] or 0) + 1
+            end
+        end
+        table.insert(lines, "--- HAND ANALYSIS (auto-computed from above) ---")
+        -- Suit histogram, sorted descending so the dominant suit is first
+        local suit_pairs = {}
+        for name, n in pairs(suits) do
+            if n > 0 then table.insert(suit_pairs, {name=name, count=n}) end
+        end
+        table.sort(suit_pairs, function(a,b) return a.count > b.count end)
+        local suit_strs = {}
+        for _, p in ipairs(suit_pairs) do
+            local idxs = table.concat(suit_indices[p.name], ",")
+            table.insert(suit_strs, string.format("%s=%d (indices: %s)", p.name, p.count, idxs))
+        end
+        table.insert(lines, "  Suits: " .. table.concat(suit_strs, " | "))
+
+        -- Rank counts, only for ranks that appear. Ordered by rank.
+        local rank_pairs = {}
+        for rname, n in pairs(ranks) do
+            table.insert(rank_pairs, {name=rname, count=n, ord=rank_order[rname] or 0})
+        end
+        table.sort(rank_pairs, function(a,b) return a.ord > b.ord end)
+        local rank_strs = {}
+        for _, p in ipairs(rank_pairs) do
+            if p.count > 1 then
+                table.insert(rank_strs, string.format("%sx%d", p.name, p.count))
+            end
+        end
+        if #rank_strs > 0 then
+            table.insert(lines, "  Paired ranks: " .. table.concat(rank_strs, ", "))
+        else
+            table.insert(lines, "  Paired ranks: (none)")
+        end
+
+        -- Reachability hints — explicit callouts for Flush/Straight
+        -- potential. Uses the counts we just computed so we don't re-
+        -- scan the hand.
+        local hints = {}
+        for _, p in ipairs(suit_pairs) do
+            if p.count == 5 then
+                table.insert(hints, string.format("FLUSH READY in %s (play 5 cards, any index of suit)", p.name))
+            elseif p.count == 4 then
+                table.insert(hints, string.format("FLUSH REACHABLE in %s — 1 discard needed (discard non-%s cards, draw for 5th)", p.name, p.name))
+            elseif p.count == 3 and (state.discards_left or 0) >= 2 then
+                table.insert(hints, string.format("Flush possible in %s (3 of 5 — needs ~2 discards and luck)", p.name))
+            end
+        end
+        -- Straight detection: slide a 5-window over rank_order, count
+        -- how many distinct ranks in hand fall in each window.
+        local present = {}
+        for r in pairs(ranks) do
+            local o = rank_order[r]
+            if o then present[o] = true end
+        end
+        -- Include Ace-low option: if Ace is present, also mark rank 1
+        if present[14] then present[1] = true end
+        for lo = 1, 10 do
+            local hi = lo + 4
+            local cnt = 0
+            for v = lo, hi do if present[v] then cnt = cnt + 1 end end
+            if cnt == 5 then
+                table.insert(hints, string.format("STRAIGHT READY (ranks %d-%d in hand)", lo, hi))
+            elseif cnt == 4 then
+                table.insert(hints, string.format("STRAIGHT REACHABLE — 1 discard (4 of 5 ranks %d-%d present)", lo, hi))
+            end
+        end
+        if #hints > 0 then
+            table.insert(lines, "  Hints: " .. table.concat(hints, " ; "))
+        end
+    end
     table.insert(lines, "")
 
     -- Jokers
@@ -451,8 +546,25 @@ function Format.pack_open(state)
     )
 
     table.insert(lines, "=== BALATRO BENCH ===")
-    table.insert(lines, string.format("Phase: Pack Opening (%s - Choose %d of %d)",
-        pack_type, choose, total))
+    table.insert(lines, string.format("Phase: Pack Opening (%s)", pack_type))
+    table.insert(lines, "")
+
+    -- PACK RULES: put the "Choose N of M" info in its own prominent
+    -- block with an explicit explanation. The header version was being
+    -- missed by models — they didn't register it as a constraint and
+    -- would sometimes select beyond the allowed count, or not realize
+    -- they could select multiple times for "Choose 2" packs.
+    table.insert(lines, "--- PACK RULES ---")
+    if choose >= total then
+        table.insert(lines, string.format(
+            "You may take ALL %d cards from this pack. Each `select` takes ONE card; after selecting, the pack reopens with the remaining cards and you can select again. Use `skip` at any point to stop opening the pack (you keep whatever you already selected).",
+            total))
+    else
+        local cards_word = (choose == 1) and "card" or "cards"
+        table.insert(lines, string.format(
+            "You may take UP TO %d %s from this pack of %d options. Each `select` takes ONE card; after selecting, the pack reopens with the remaining cards and you can select again (up to %d total selections). Use `skip` at any point to stop — you keep whatever you already selected and forfeit the rest.",
+            choose, cards_word, total, choose))
+    end
     table.insert(lines, "")
 
     -- Pack contents
@@ -506,7 +618,10 @@ function Format.pack_open(state)
     -- target card and crashes. We document both call shapes here so the
     -- model can construct the right JSON based on what it chose.
     table.insert(lines, "--- ACTIONS ---")
-    table.insert(lines, "select          | Pick a card from the pack.")
+    local remaining_selects = (choose == 1) and "1 selection" or (tostring(choose) .. " selections")
+    table.insert(lines, string.format(
+        "select          | Take ONE card from the pack (this turn). You have %s remaining.",
+        remaining_selects))
     table.insert(lines, '                | Plain form:    {"action":"select","index":<N>}')
     if pack_may_need_targets then
         table.insert(lines, '                | Targeted form: {"action":"select","index":<N>,"cards":[<hand_idx>,...]}')
@@ -519,7 +634,11 @@ function Format.pack_open(state)
         table.insert(lines, "                |   If you pick a NON-targeting card (Wraith, Ankh, Hex, Soul,")
         table.insert(lines, "                |   Black Hole, Sigil, Ouija, Judgement, etc.) omit `cards`.")
     end
-    table.insert(lines, "skip            | Skip the pack, take nothing.")
+    if choose > 1 then
+        table.insert(lines, "                | After selecting, the pack will reopen with the remaining cards")
+        table.insert(lines, "                | and a decremented `Choose` count, so you can pick another.")
+    end
+    table.insert(lines, "skip            | Stop opening the pack. You keep anything already selected.")
 
     return table.concat(lines, "\n")
 end
